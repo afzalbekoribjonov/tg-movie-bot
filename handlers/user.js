@@ -59,15 +59,15 @@ export function userHandler(bot) {
 
         const code = Number(text);
 
-        const movie = getMovieByCode(code);
+        const movie = await getMovieByCode(code);
         if (movie) {
             await sendMedia(ctx, movie);
             return;
         }
 
-        const series = getSeriesByCode(code);
+        const series = await getSeriesByCode(code);
         if (series) {
-            const episodes = getSeriesEpisodes(code);
+            const episodes = await getSeriesEpisodes(code);
 
             const title = escapeHTML(series.title);
             const year = escapeHTML(String(series.year));

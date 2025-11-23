@@ -10,10 +10,11 @@ export function adminCommandsHandler(bot) {
         return ctx.reply('Kanal username/ID sini kiriting (Masalan: @Kanalim, -1001234567890):');
     });
 
-    bot.command('delchannel', (ctx) => {
+    bot.command('delchannel', async (ctx) => {
         const uid = Number(ctx.from?.id);
         if (!isAdmin(uid)) return ctx.reply('Siz admin emassiz.');
-        const channels = getChannels();
+
+        const channels = await getChannels();
 
         if (channels.length === 0) {
             return ctx.reply('Hozircha o‘chirish uchun kanal mavjud emas.');

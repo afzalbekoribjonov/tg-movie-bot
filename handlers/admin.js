@@ -2,14 +2,14 @@ import {
     addMovie, getMovieByCode, addSeries, addSeriesEpisode, getSeriesByCode,
     getChannels, addChannel, deleteChannel, isAdmin, deleteMovie, deleteSeries,
     updateMovie, updateSeries, getSeriesEpisodes, deleteSeriesEpisode,
-    getAllUserIds // Broadcast uchun
+    getAllUserIds
 } from '../database.js';
 import { adminCommandsHandler } from './admin_commands.js';
 import { sendEditDeleteMenu } from './admin_panel_utils.js';
 import { getStatsMenuData, createListMenuData } from './admin_stats.js';
 
 async function sendBroadcastAdvanced(bot, message) {
-    const userIds = getAllUserIds();
+    const userIds = await getAllUserIds();
     let successCount = 0;
     let failCount = 0;
 
@@ -80,7 +80,6 @@ export function adminHandler(bot) {
         );
     });
 
-    // --- 1. BROADCAST MEDIA / MESSAGE HANDLER ---
     bot.on('message', async (ctx, next) => {
         const uid = Number(ctx.from?.id);
         if (!isAdmin(uid)) { return next(); }
@@ -90,7 +89,7 @@ export function adminHandler(bot) {
 
         if (step === 'broadcast_message' && ctx.message) {
 
-            ctx.session.adminStep = null; // Bosqichni tugatish
+            ctx.session.adminStep = null;
 
             const waitMessage = await ctx.reply('⏳ Xabar tahlil qilinyapti va yuborish boshlandi...');
 
@@ -128,46 +127,36 @@ export function adminHandler(bot) {
         if (action === 'admin') {
             const adminAction = params[0];
 
-            if (adminAction === 'broadcast') {
-                ctx.session.adminStep = 'broadcast_message';
-                ctx.deleteMessage().catch(() => {});
-                return ctx.reply('Barcha foydalanuvchilarga yubormoqchi bo‘lgan **xabaringizni yuboring (Text, Rasm, Video)**.\n\n⚠️ Eslatma: Formatlash (HTML) va tugmalar saqlanadi. Forwarded belgisi bo‘lmaydi.', { parse_mode: 'Markdown' });
-            }
-
-            if (adminAction === 'show_stats') {
-                const { message, buttons } = getStatsMenuData();
-                return ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
-            }
-
-            if (adminAction === 'list' || adminAction === 'listpage') {
-                const [type, page] = params.slice(1);
-                const pageNum = Number(page);
-                const listData = createListMenuData(type, pageNum);
-
-                if (!listData) return;
-                return ctx.editMessageText(listData.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: listData.buttons } });
-            }
-
             if (adminAction === 'add_movie') {
                 ctx.session.adminStep = 'add_movie_code';
-                ctx.deleteMessage().catch(() => {});
-                return ctx.reply('Kino kodi (faqat raqam) kiriting:');
-            }
-            if (adminAction === 'add_series') {
+                return ctx.editMessageText('Kino kodini kiriting (Masalan: 1001):');
+            } else if (adminAction === 'add_series') {
                 ctx.session.adminStep = 'add_series_code';
-                ctx.deleteMessage().catch(() => {});
-                return ctx.reply('Serial kodi (faqat raqam) kiriting:');
-            }
-            if (adminAction === 'edit_item') {
+                return ctx.editMessageText('Serial kodini kiriting (Masalan: 2001):');
+            } else if (adminAction === 'edit_item') {
                 ctx.session.adminStep = 'edit_item_code';
-                ctx.deleteMessage().catch(() => {});
-                return ctx.reply('Tahrirlamoqchi bo‘lgan Kino yoki Serial kodini kiriting:');
-            }
-            if (adminAction === 'channels') {
-                const channels = getChannels();
+                return ctx.editMessageText('Tahrirlamoqchi bo‘lgan kino yoki serial kodini kiriting:');
+            } else if (adminAction === 'show_stats') {
+                const { message, buttons } = await getStatsMenuData();
+                return ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+            } else if (adminAction === 'list') {
+                const [type, page] = [params[1], Number(params[2])];
+                const data = await createListMenuData(type, page);
+                if (!data) return ctx.editMessageText('Noto‘g‘ri tur.');
+                return ctx.editMessageText(data.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: data.buttons } });
+            } else if (adminAction === 'listpage') {
+                const [type, page] = [params[1], Number(params[2])];
+                const data = await createListMenuData(type, page);
+                if (!data) return ctx.editMessageText('Noto‘g‘ri tur.');
+                return ctx.editMessageText(data.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: data.buttons } });
+            } else if (adminAction === 'broadcast') {
+                ctx.session.adminStep = 'broadcast_message';
+                return ctx.editMessageText('Foydalanuvchilarga yubormoqchi bo‘lgan xabaringizni yuboring (text/photo/video/doc):');
+            } else if (adminAction === 'channels') {
+                const channels = await getChannels();
                 let msg = '📢 Majburiy kanallar ro‘yxati:\n\n';
                 if (channels.length === 0) msg += 'Hozircha kanal yo‘q.';
-                else channels.forEach(c => { msg += `🔹 ${c.name} — ${c.link}\n`; });
+                else channels.forEach(c => { msg += `🔹 ${c.name} — ${c.channel_id} (${c.link})\n`; });
                 msg += '\n➕ Qo‘shish: /addchannel\n➖ O‘chirish: /delchannel';
                 return ctx.editMessageText(msg);
             }
@@ -175,8 +164,13 @@ export function adminHandler(bot) {
 
         if (action === 'delete_channel') {
             const channelId = params[0];
-            deleteChannel(channelId);
-            await ctx.editMessageText(`✅ Kanal (${channelId}) muvaffaqiyatli o‘chirildi!`).catch(console.error);
+            const result = await deleteChannel(channelId);
+
+            if (result?.deletedCount > 0) {
+                await ctx.editMessageText(`✅ Kanal (${channelId}) muvaffaqiyatli o‘chirildi!`).catch(console.error);
+            } else {
+                await ctx.editMessageText(`⚠️ Kanal (${channelId}) o‘chirishda xatolik yuz berdi yoki u topilmadi.`).catch(console.error);
+            }
             return;
         }
 
@@ -186,12 +180,14 @@ export function adminHandler(bot) {
             let result;
 
             if (type === 'movie') {
-                result = deleteMovie(codeNum);
+                // deleteMovie() chaqiruvi oldiga AWAIТ qo'shildi
+                result = await deleteMovie(codeNum);
             } else if (type === 'series') {
-                result = deleteSeries(codeNum);
+                // deleteSeries() chaqiruvi oldiga AWAIТ qo'shildi
+                result = await deleteSeries(codeNum);
             }
 
-            if (result?.changes > 0) {
+            if (result?.deletedCount > 0) {
                 await ctx.editMessageText(`✅ ${type === 'movie' ? 'Kino' : 'Serial'} (Kod: ${code}) bazadan butunlay o‘chirildi!`).catch(console.error);
             } else {
                 await ctx.editMessageText(`⚠️ ${type === 'movie' ? 'Kino' : 'Serial'} (Kod: ${code}) o‘chirishda xatolik yuz berdi yoki u topilmadi.`).catch(console.error);
@@ -200,29 +196,21 @@ export function adminHandler(bot) {
         }
 
         if (action === 'edit') {
-            const [type, code, edit_field] = params;
-            const codeNum = Number(code);
+            const [type, code, editType] = params;
+            ctx.session.editItem = { type, code: Number(code) };
 
-            ctx.session.editItem = { type, code: codeNum, field: edit_field };
-
-            if (edit_field === 'details') {
+            if (editType === 'details') {
                 ctx.session.adminStep = 'edit_details';
-                return ctx.editMessageText(`<b>${type === 'movie' ? 'Kino' : 'Serial'}</b> (Kod: ${code}) uchun yangi Nomi | Janri | Yili | Tavsifini ushbu formatda kiriting:\n\n<code>Yangi Nomi | Yangi Janri | Yangi Yili | Yangi Tavsifi</code>`, { parse_mode: 'HTML' });
-            }
-
-            if (edit_field === 'link' && type === 'movie') {
+                return ctx.editMessageText('Iltimos, Nomi | Janri | Yili | Tavsifi formatida ma’lumotlarni kiriting:');
+            } else if (editType === 'link' && type === 'movie') {
                 ctx.session.adminStep = 'edit_movie_link';
-                return ctx.editMessageText(`<b>Kino</b> (Kod: ${code}) uchun yangi linkni kiriting:`, { parse_mode: 'HTML' });
-            }
-
-            if (edit_field === 'add_ep' && type === 'series') {
+                return ctx.editMessageText('Yangi kino linkini yuboring:');
+            } else if (editType === 'add_ep' && type === 'series') {
                 ctx.session.adminStep = 'edit_series_add_ep';
-                return ctx.editMessageText(`<b>Serial</b> (Kod: ${code}) uchun keyingi epizod linkini yuboring:`, { parse_mode: 'HTML' });
-            }
-
-            if (edit_field === 'del_ep' && type === 'series') {
+                return ctx.editMessageText('Yangi epizod linkini yuboring:');
+            } else if (editType === 'del_ep' && type === 'series') {
                 ctx.session.adminStep = 'edit_series_del_ep';
-                return ctx.editMessageText(`<b>Serial</b> (Kod: ${code}) dan o‘chirmoqchi bo‘lgan epizod raqamini kiriting (masalan: 5):`, { parse_mode: 'HTML' });
+                return ctx.editMessageText('O‘chirmoqchi bo‘lgan epizod raqamini kiriting (Masalan: 5):');
             }
         }
 
@@ -246,9 +234,12 @@ export function adminHandler(bot) {
             if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat raqamli kod kiriting.');
             const codeNum = Number(text);
 
-            if (getMovieByCode(codeNum)) {
+            const movie = await getMovieByCode(codeNum);
+            const series = await getSeriesByCode(codeNum);
+
+            if (movie) {
                 await sendEditDeleteMenu(ctx, codeNum, 'movie');
-            } else if (getSeriesByCode(codeNum)) {
+            } else if (series) {
                 await sendEditDeleteMenu(ctx, codeNum, 'series');
             } else {
                 return ctx.reply('Bu kodga tegishli Kino yoki Serial bazada topilmadi.');
@@ -269,12 +260,13 @@ export function adminHandler(bot) {
                 const fields = { title, genre, year: Number(year), desc };
 
                 if (item.type === 'movie') {
-                    const existingMovie = getMovieByCode(item.code);
+                    const existingMovie = await getMovieByCode(item.code);
                     if (!existingMovie) return ctx.reply('Kino topilmadi.');
 
-                    updateMovie(item.code, { ...fields, link: existingMovie.link });
+                    await updateMovie(item.code, { ...fields, link: existingMovie.link });
                 } else if (item.type === 'series') {
-                    updateSeries(item.code, fields);
+
+                    await updateSeries(item.code, fields);
                 }
 
                 ctx.session.adminStep = null;
@@ -282,11 +274,13 @@ export function adminHandler(bot) {
                 return ctx.reply(`✅ ${item.type === 'movie' ? 'Kino' : 'Serial'} (Kod: ${item.code}) ma’lumotlari muvaffaqiyatli tahrirlandi.`);
             }
 
+
             if (step === 'edit_movie_link' && item.type === 'movie') {
-                const existingMovie = getMovieByCode(item.code);
+
+                const existingMovie = await getMovieByCode(item.code);
                 if (!existingMovie) return ctx.reply('Kino topilmadi.');
 
-                updateMovie(item.code, {
+                await updateMovie(item.code, {
                     title: existingMovie.title,
                     desc: existingMovie.desc,
                     genre: existingMovie.genre,
@@ -300,10 +294,10 @@ export function adminHandler(bot) {
             }
 
             if (step === 'edit_series_add_ep' && item.type === 'series') {
-                const episodes = getSeriesEpisodes(item.code);
+                const episodes = await getSeriesEpisodes(item.code);
                 const nextEpNum = episodes ? episodes.length + 1 : 1;
 
-                addSeriesEpisode(item.code, nextEpNum, text);
+                await addSeriesEpisode(item.code, nextEpNum, text);
 
                 ctx.session.adminStep = null;
                 ctx.session.editItem = null;
@@ -314,12 +308,12 @@ export function adminHandler(bot) {
                 const episodeNum = Number(text);
                 if (!/^\d+$/.test(text) || episodeNum <= 0) return ctx.reply('Iltimos, musbat butun epizod raqamini kiriting.');
 
-                const result = deleteSeriesEpisode(item.code, episodeNum);
+                const result = await deleteSeriesEpisode(item.code, episodeNum);
 
                 ctx.session.adminStep = null;
                 ctx.session.editItem = null;
 
-                if (result?.changes > 0) {
+                if (result?.deletedCount > 0) {
                     return ctx.reply(`✅ Serial (Kod: ${item.code}) dan ${episodeNum}-epizod muvaffaqiyatli o‘chirildi.`);
                 } else {
                     return ctx.reply(`⚠️ Serial (Kod: ${item.code}) da ${episodeNum}-epizod topilmadi yoki o‘chirilmadi.`);
@@ -331,7 +325,7 @@ export function adminHandler(bot) {
             switch (step) {
                 case 'add_movie_code':
                     if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat raqam kiriting.');
-                    if (getMovieByCode(Number(text))) return ctx.reply('Bu kod oldin olingan. Boshqasini kiriting.');
+                    if (await getMovieByCode(Number(text))) return ctx.reply('Bu kod oldin olingan. Boshqasini kiriting.');
                     ctx.session.newMovie = { code: Number(text) };
                     ctx.session.adminStep = 'add_movie_title';
                     return ctx.reply('Kino nomini kiriting:');
@@ -339,34 +333,34 @@ export function adminHandler(bot) {
                 case 'add_movie_title':
                     ctx.session.newMovie.title = text;
                     ctx.session.adminStep = 'add_movie_genre';
-                    return ctx.reply('Janr kiriting:');
+                    return ctx.reply('Kino janrini kiriting (Masalan: Fantastika, Jangari):');
 
                 case 'add_movie_genre':
                     ctx.session.newMovie.genre = text;
                     ctx.session.adminStep = 'add_movie_year';
-                    return ctx.reply('Yil kiriting (masalan 2024):');
+                    return ctx.reply('Kino yilini kiriting (Masalan: 2023):');
 
                 case 'add_movie_year':
-                    if (!/^\d{4}$/.test(text)) return ctx.reply('4 xonali yil kiriting.');
+                    if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat yilni kiriting.');
                     ctx.session.newMovie.year = Number(text);
                     ctx.session.adminStep = 'add_movie_desc';
-                    return ctx.reply('Kino tavsifi (ixtiyoriy):');
+                    return ctx.reply('Kino tavsifini kiriting:');
 
                 case 'add_movie_desc':
                     ctx.session.newMovie.desc = text;
                     ctx.session.adminStep = 'add_movie_link';
-                    return ctx.reply('Kino linkini yuboring:');
+                    return ctx.reply('Kino linkini yuboring (Masalan: https://t.me/filmler/1234):');
 
                 case 'add_movie_link':
                     ctx.session.newMovie.link = text;
-                    addMovie(ctx.session.newMovie);
+                    await addMovie(ctx.session.newMovie);
                     ctx.session.adminStep = null;
                     ctx.session.newMovie = null;
                     return ctx.reply('Kino muvaffaqiyatli qo‘shildi! 🎉');
 
                 case 'add_series_code':
                     if (!/^\d+$/.test(text)) return ctx.reply('Faqat raqam kiriting.');
-                    if (getSeriesByCode(Number(text))) return ctx.reply('Bu kod oldin band qilingan.');
+                    if (await getSeriesByCode(Number(text))) return ctx.reply('Bu kod oldin band qilingan.');
                     ctx.session.newSeries = { code: Number(text), episodes: [] };
                     ctx.session.adminStep = 'add_series_title';
                     return ctx.reply('Serial nomini kiriting:');
@@ -379,23 +373,23 @@ export function adminHandler(bot) {
                 case 'add_series_genre':
                     ctx.session.newSeries.genre = text;
                     ctx.session.adminStep = 'add_series_year';
-                    return ctx.reply('Yil kiriting (2024):');
+                    return ctx.reply('Serial yilini kiriting:');
 
                 case 'add_series_year':
-                    if (!/^\d{4}$/.test(text)) return ctx.reply('4 xonali yil kiriting.');
+                    if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat yilni kiriting.');
                     ctx.session.newSeries.year = Number(text);
                     ctx.session.adminStep = 'add_series_desc';
-                    return ctx.reply('Serial tavsifi (ixtiyoriy):');
+                    return ctx.reply('Serial tavsifini kiriting:');
 
                 case 'add_series_desc':
                     ctx.session.newSeries.desc = text;
                     ctx.session.adminStep = 'add_series_episode';
-                    return ctx.reply('1-qism linkini yuboring:');
+                    return ctx.reply('Serialning 1-qism linkini yuboring:');
 
                 case 'add_series_episode':
                     ctx.session.newSeries.episodes.push(text);
                     ctx.session.adminStep = 'add_series_more';
-                    return ctx.reply('Yana qism qo‘shasizmi? (Ha/Yo‘q)');
+                    return ctx.reply('Yana epizod qo‘shishni xohlaysizmi? (Ha/Yo‘q)');
 
                 case 'add_series_more':
                     if (text.toLowerCase() === 'ha' || text.toLowerCase() === 'xa') {
@@ -408,7 +402,7 @@ export function adminHandler(bot) {
                             return ctx.reply('Serial epizodlari qo‘shilmaganligi sababli serial qo‘shilmadi. Jarayon bekor qilindi.');
                         }
 
-                        addSeries({
+                        await addSeries({
                             code: ctx.session.newSeries.code,
                             title: ctx.session.newSeries.title,
                             desc: ctx.session.newSeries.desc,
@@ -416,9 +410,9 @@ export function adminHandler(bot) {
                             year: ctx.session.newSeries.year
                         });
 
-                        ctx.session.newSeries.episodes.forEach((link, index) => {
-                            addSeriesEpisode(ctx.session.newSeries.code, index + 1, link);
-                        });
+                        for (const [index, link] of ctx.session.newSeries.episodes.entries()) {
+                            await addSeriesEpisode(ctx.session.newSeries.code, index + 1, link);
+                        }
 
                         ctx.session.adminStep = null;
                         ctx.session.newSeries = null;
@@ -426,30 +420,26 @@ export function adminHandler(bot) {
                     }
 
                 case 'add_channel_id':
-                    let channelId = text.trim();
-                    if (!channelId.startsWith('-100')) {
-                        if (channelId.startsWith('https://t.me/')) {
-                            channelId = '@' + channelId.split('/').pop();
-                        } else if (!channelId.startsWith('@')) {
-                            channelId = '@' + channelId;
-                        }
+                    const channelId = text.startsWith('@') ? text : Number(text);
+                    if (!channelId || (typeof channelId === 'string' && channelId.length < 2)) {
+                        return ctx.reply('Noto‘g‘ri kanal username/ID sini kiritdingiz.');
                     }
-
                     ctx.session.newChannel = { channel_id: channelId };
                     ctx.session.adminStep = 'add_channel_name';
-                    return ctx.reply(`Kanal nomi (masalan: Rasmiy Kino Kanal) kiriting:`);
+                    return ctx.reply('Kanal nomi (Masalan: Rasmiy Kino Kanal) kiriting:');
 
                 case 'add_channel_name':
                     ctx.session.newChannel.name = text;
                     ctx.session.adminStep = 'add_channel_link';
-                    return ctx.reply(`Kanalga o‘tish linkini kiriting (masalan: https://t.me/Kanalim):`);
+                    return ctx.reply('Kanalga o‘tish linkini kiriting (Masalan: https://t.me/Kanalim):');
 
                 case 'add_channel_link':
                     ctx.session.newChannel.link = text;
-                    addChannel(ctx.session.newChannel);
+                    await addChannel(ctx.session.newChannel);
 
                     ctx.session.adminStep = null;
                     ctx.session.newChannel = null;
+                    // ✅ RETURN qo'shildi
                     return ctx.reply(`✅ Kanal muvaffaqiyatli qo‘shildi!`);
             }
         }

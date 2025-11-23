@@ -8,7 +8,7 @@ export async function sendEditDeleteMenu(ctx, code, type) {
     let buttons = [];
 
     if (type === 'movie') {
-        item = getMovieByCode(code);
+        item = await getMovieByCode(code);
         titleKey = '🎬 Kino';
         buttons = [
             [{ text: '✏️ Nomi/Janri/Yili/Tavsifi', callback_data: `edit:${type}:${code}:details` }],
@@ -16,7 +16,7 @@ export async function sendEditDeleteMenu(ctx, code, type) {
             [{ text: '🗑 O‘chirish', callback_data: `delete:${type}:${code}` }]
         ];
     } else if (type === 'series') {
-        item = getSeriesByCode(code);
+        item = await getSeriesByCode(code);
         titleKey = '📺 Serial';
         buttons = [
             [{ text: '✏️ Nomi/Janri/Yili/Tavsifi', callback_data: `edit:${type}:${code}:details` }],

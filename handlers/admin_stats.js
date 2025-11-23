@@ -10,10 +10,10 @@ import {
 
 const ITEMS_PER_PAGE = 15;
 
-export function getStatsMenuData() {
-    const movieCount = countMovies();
-    const seriesCount = countSeries();
-    const userCount = countUsers();
+export async function getStatsMenuData() {
+    const movieCount = await countMovies();
+    const seriesCount = await countSeries();
+    const userCount = await countUsers();
 
     const message = `
 📊 <b>Bot Statistikasi</b> 📊
@@ -31,18 +31,18 @@ export function getStatsMenuData() {
     return { message, buttons };
 }
 
-export function createListMenuData(type, page) {
+export async function createListMenuData(type, page) {
     let items;
     let totalPages;
     let title;
 
     if (type === 'movie') {
-        items = getPaginatedMovies(page);
-        totalPages = getTotalMoviePages();
+        items = await getPaginatedMovies(page);
+        totalPages = await getTotalMoviePages();
         title = '🎬 Kinolar Ro‘yxati';
     } else if (type === 'series') {
-        items = getPaginatedSeries(page);
-        totalPages = getTotalSeriesPages();
+        items = await getPaginatedSeries(page);
+        totalPages = await getTotalSeriesPages();
         title = '📺 Seriallar Ro‘yxati';
     } else {
         return null;

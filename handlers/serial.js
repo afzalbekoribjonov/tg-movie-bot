@@ -58,10 +58,12 @@ export function serialHandler(bot) {
 
         await ctx.answerCbQuery().catch(console.error);
 
-        const series = getSeriesByCode(code);
+        // getSeriesByCode() chaqiruvi oldiga AWAIТ qo'shildi
+        const series = await getSeriesByCode(code);
         if (!series) return;
 
-        const episodes = getSeriesEpisodes(code);
+        // getSeriesEpisodes() chaqiruvi oldiga AWAIТ qo'shildi
+        const episodes = await getSeriesEpisodes(code);
         if (!episodes || episodes.length === 0) {
             try {
                 if (ctx.callbackQuery.message.text) {

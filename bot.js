@@ -5,8 +5,6 @@ import { adminHandler } from './handlers/admin.js';
 import config from './config.js';
 import { sendMedia, escapeHTML } from './utils.js';
 
-initDB();
-
 const bot = new Telegraf(config.BOT_TOKEN);
 
 bot.use(session());
@@ -26,7 +24,7 @@ bot.use(async (ctx, next) => {
     }
 
     if (ctx.message && ctx.from) {
-        const channels = getChannels();
+        const channels = await getChannels();
 
         if (channels.length > 0) {
             let allJoined = true;
@@ -63,7 +61,7 @@ bot.use(async (ctx, next) => {
 });
 
 bot.command('random', async (ctx) => {
-    const movies = getAllMovies();
+    const movies = await getAllMovies();
 
     if (!movies.length) {
         return ctx.reply(escapeHTML('Hozircha kino mavjud emas.'), { parse_mode: 'HTML' });
@@ -74,15 +72,14 @@ bot.command('random', async (ctx) => {
     await sendMedia(ctx, movie);
 });
 
-
-bot.start((ctx) => {
+bot.start(async (ctx) => {
     const userId = ctx.from.id;
     const username = ctx.from.username || null;
     const firstName = ctx.from.first_name || 'Foydalanuvchi';
 
-    const userAlreadyExists = checkUserExists(userId);
+    const userAlreadyExists = await checkUserExists(userId);
 
-    addUser(userId, username, firstName);
+    await addUser(userId, username, firstName);
 
     let welcomeMessage;
 
@@ -92,7 +89,6 @@ Assalomu alaykum, <b>${escapeHTML(firstName)}</b>!
 Xush kelibsiz, Iltimos, kino kodini kiriting!
 `;
     } else {
-        // Takroriy kirish
         welcomeMessage = `
 <b>${escapeHTML(firstName)}</b>, iltimos kino kodini kiriting!
 `;
@@ -106,7 +102,18 @@ adminHandler(bot);
 
 userHandler(bot);
 
-bot.launch().then(() => console.log('Bot muvaffaqiyatli ishga tushdi! 🎉'));
+async function startBot() {
+    await initDB();
+
+    await bot.launch({
+        polling: {
+            timeout: 30,
+            limit: 100
+        }
+    }).then(() => console.log('Bot muvaffaqiyatli ishga tushdi! 🎉'));
+}
+
+startBot();
 
 process.once('SIGINT', () => {
     bot.stop('SIGINT');

@@ -5,15 +5,20 @@
   "type": "module",
   "scripts": {
     "start": "node bot.js",
-    "prestart": "npm rebuild better-sqlite3 --build-from-source",
     "dev": "nodemon bot.js"
   },
-  "keywords": [],
+  "keywords": [
+    "telegram",
+    "bot",
+    "telegraf",
+    "mongoose"
+  ],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Telegram bot for managing movies and series using MongoDB.",
   "dependencies": {
-    "better-sqlite3": "^12.4.6",
+    "dotenv": "^17.2.3",
+    "mongoose": "^9.0.0",
     "telegraf": "^4.16.3"
   },
   "devDependencies": {

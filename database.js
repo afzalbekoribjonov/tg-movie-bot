@@ -1,222 +1,258 @@
-import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
+import mongoose from 'mongoose';
 import config from './config.js';
-const dbPath = path.resolve('./data/sqlite.db');
 
-if (!fs.existsSync(dbPath)) {
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    fs.closeSync(fs.openSync(dbPath, 'w'));
-    console.log('Database yaratildi: ', dbPath);
+const UserSchema = new mongoose.Schema({
+    user_id: { type: Number, required: true, unique: true },
+    username: { type: String, default: null },
+    first_name: { type: String, default: null },
+    created_at: { type: Date, default: Date.now },
+});
+const User = mongoose.model('User', UserSchema);
+
+const MovieSchema = new mongoose.Schema({
+    code: { type: Number, required: true, unique: true },
+    title: { type: String, required: true },
+    desc: { type: String, default: null },
+    genre: { type: String, default: null },
+    year: { type: Number, default: null },
+    link: { type: String, default: null },
+    created_at: { type: Date, default: Date.now },
+});
+const Movie = mongoose.model('Movie', MovieSchema);
+
+const SeriesSchema = new mongoose.Schema({
+    code: { type: Number, required: true, unique: true },
+    title: { type: String, required: true },
+    desc: { type: String, default: null },
+    genre: { type: String, default: null },
+    year: { type: Number, default: null },
+    created_at: { type: Date, default: Date.now },
+});
+const Series = mongoose.model('Series', SeriesSchema);
+
+const SeriesEpisodeSchema = new mongoose.Schema({
+    series_code: { type: Number, required: true },
+    episode: { type: Number, required: true },
+    link: { type: String, required: true },
+});
+
+SeriesEpisodeSchema.index({ series_code: 1, episode: 1 }, { unique: true });
+const SeriesEpisode = mongoose.model('SeriesEpisode', SeriesEpisodeSchema);
+
+const ChannelSchema = new mongoose.Schema({
+    channel_id: { type: String, required: true, unique: true },
+    name: { type: String, default: null },
+    link: { type: String, default: null },
+});
+const Channel = mongoose.model('Channel', ChannelSchema);
+
+
+export async function initDB() {
+    if (!config.MONGODB_URI) {
+        console.error("XATO: MONGODB_URI atrof-muhit o'zgaruvchisi o'rnatilmagan. Ulanish qatorini o'rnatish shart.");
+        process.exit(1);
+    }
+
+    try {
+        await mongoose.connect(config.MONGODB_URI);
+        console.log('MongoDB ga muvaffaqiyatli ulanildi!');
+        console.log('All models initialized (collections automatically created/managed).');
+        return true;
+    } catch (error) {
+        console.error('MongoDB ga ulanishda xato:', error);
+        process.exit(1);
+    }
 }
 
-const db = new Database(dbPath);
 
-export function initDB() {
-    db.prepare(`
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY NOT NULL,
-            username TEXT,
-            first_name TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    `).run();
-
-    db.prepare(`
-        CREATE TABLE IF NOT EXISTS movies (
-                                              id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                              code INTEGER UNIQUE NOT NULL,
-                                              title TEXT NOT NULL,
-                                              desc TEXT,
-                                              genre TEXT,
-                                              year INTEGER,
-                                              link TEXT,
-                                              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    `).run();
-
-    db.prepare(`
-        CREATE TABLE IF NOT EXISTS series (
-                                              id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                              code INTEGER UNIQUE NOT NULL,
-                                              title TEXT NOT NULL,
-                                              desc TEXT,
-                                              genre TEXT,
-                                              year INTEGER,
-                                              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    `).run();
-
-    db.prepare(`
-        CREATE TABLE IF NOT EXISTS series_episodes (
-                                                       id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                                       series_code INTEGER NOT NULL,
-                                                       episode INTEGER NOT NULL,
-                                                       link TEXT NOT NULL,
-                                                       UNIQUE(series_code, episode)
-            )
-    `).run();
-
-    db.prepare(`
-        CREATE TABLE IF NOT EXISTS channels (
-                                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                                channel_id TEXT UNIQUE NOT NULL,
-                                                name TEXT,
-                                                link TEXT
-        )
-    `).run();
-
-    console.log('All tables created / initialized.');
+export async function addUser(userId, username, firstName) {
+    try {
+        return await User.findOneAndUpdate(
+            { user_id: Number(userId) },
+            {
+                user_id: Number(userId),
+                username: username,
+                first_name: firstName
+            },
+            {
+                upsert: true,
+                new: true,
+                runValidators: true
+            }
+        );
+    } catch (error) {
+        if (error.code === 11000) {
+            return null;
+        }
+        throw error;
+    }
 }
 
-export function addUser(userId, username, firstName) {
-    const stmt = db.prepare(`
-        INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)
-    `);
-    return stmt.run(Number(userId), username, firstName);
+export async function checkUserExists(userId) {
+    const user = await User.findOne({ user_id: Number(userId) }).select('user_id').lean();
+    return !!user;
 }
 
-export function checkUserExists(userId) {
-    const stmt = db.prepare('SELECT user_id FROM users WHERE user_id = ?');
-    return !!stmt.get(Number(userId));
+export async function getAllUserIds() {
+    const users = await User.find({}).select('user_id').lean();
+    return users.map(row => Number(row.user_id));
 }
 
-export function getAllUserIds() {
-    const stmt = db.prepare('SELECT user_id FROM users');
-    return stmt.all().map(row => Number(row.user_id));
+export async function countUsers() {
+    return await User.countDocuments();
 }
 
-export function countUsers() {
-    return db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+
+export async function addMovie(movie) {
+    const newMovie = new Movie({
+        code: Number(movie.code),
+        title: movie.title,
+        desc: movie.desc,
+        genre: movie.genre,
+        year: Number(movie.year),
+        link: movie.link
+    });
+    return await newMovie.save();
 }
 
-export function addMovie(movie) {
-    const stmt = db.prepare(`
-        INSERT INTO movies (code, title, desc, genre, year, link)
-        VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    return stmt.run(Number(movie.code), movie.title, movie.desc, movie.genre, Number(movie.year), movie.link);
+export async function getMovieByCode(code) {
+    return await Movie.findOne({ code: Number(code) }).lean();
 }
 
-export function getMovieByCode(code) {
-    const stmt = db.prepare(`SELECT * FROM movies WHERE code = ?`);
-    return stmt.get(Number(code));
+export async function getAllMovies() {
+    return await Movie.find({}).lean();
 }
 
-export function getAllMovies() {
-    return db.prepare(`SELECT * FROM movies`).all();
+export async function updateMovie(code, fields) {
+    const updateFields = {
+        title: fields.title,
+        desc: fields.desc,
+        genre: fields.genre,
+        year: fields.year ? Number(fields.year) : undefined,
+        link: fields.link
+    };
+    return await Movie.updateOne({ code: Number(code) }, { $set: updateFields });
 }
 
-export function updateMovie(code, fields) {
-    const { title, desc, genre, year, link } = fields;
-    const stmt = db.prepare(`
-        UPDATE movies SET title = ?, desc = ?, genre = ?, year = ?, link = ?
-        WHERE code = ?
-    `);
-    return stmt.run(title, desc, genre, Number(year), link, Number(code));
+export async function deleteMovie(code) {
+    return await Movie.deleteOne({ code: Number(code) });
 }
 
-export function deleteMovie(code) {
-    return db.prepare(`DELETE FROM movies WHERE code = ?`).run(Number(code));
+export async function countMovies() {
+    return await Movie.countDocuments();
 }
 
-export function addSeries(series) {
-    const stmt = db.prepare(`
-        INSERT INTO series (code, title, desc, genre, year)
-        VALUES (?, ?, ?, ?, ?)
-    `);
-    return stmt.run(Number(series.code), series.title, series.desc, series.genre, Number(series.year));
+
+export async function addSeries(series) {
+    const newSeries = new Series({
+        code: Number(series.code),
+        title: series.title,
+        desc: series.desc,
+        genre: series.genre,
+        year: Number(series.year)
+    });
+    return await newSeries.save();
 }
 
-export function getSeriesByCode(code) {
-    const stmt = db.prepare(`SELECT * FROM series WHERE code = ?`);
-    return stmt.get(Number(code));
+export async function getSeriesByCode(code) {
+    return await Series.findOne({ code: Number(code) }).lean();
 }
 
-export function deleteSeries(code) {
-    db.prepare(`DELETE FROM series_episodes WHERE series_code = ?`).run(Number(code));
-    return db.prepare(`DELETE FROM series WHERE code = ?`).run(Number(code));
+export async function deleteSeries(code) {
+    const seriesCode = Number(code);
+    await SeriesEpisode.deleteMany({ series_code: seriesCode });
+    return await Series.deleteOne({ code: seriesCode });
 }
 
-export function updateSeries(code, fields) {
-    const { title, desc, genre, year } = fields;
-    const stmt = db.prepare(`
-        UPDATE series SET title = ?, desc = ?, genre = ?, year = ?
-        WHERE code = ?
-    `);
-    return stmt.run(title, desc, genre, Number(year), Number(code));
+export async function updateSeries(code, fields) {
+    const updateFields = {
+        title: fields.title,
+        desc: fields.desc,
+        genre: fields.genre,
+        year: fields.year ? Number(fields.year) : undefined
+    };
+    return await Series.updateOne({ code: Number(code) }, { $set: updateFields });
 }
 
-export function deleteSeriesEpisode(series_code, episode) {
-    return db.prepare(`DELETE FROM series_episodes WHERE series_code = ? AND episode = ?`).run(Number(series_code), Number(episode));
+export async function countSeries() {
+    return await Series.countDocuments();
 }
 
-export function countMovies() {
-    return db.prepare('SELECT COUNT(*) as count FROM movies').get().count;
+export async function deleteSeriesEpisode(series_code, episode) {
+    return await SeriesEpisode.deleteOne({
+        series_code: Number(series_code),
+        episode: Number(episode)
+    });
 }
 
-export function countSeries() {
-    return db.prepare('SELECT COUNT(*) as count FROM series').get().count;
+export async function addSeriesEpisode(series_code, episode, link) {
+    return await SeriesEpisode.findOneAndUpdate(
+        { series_code: Number(series_code), episode: Number(episode) },
+        { link: link }, // Yangilash uchun
+        { upsert: true, new: true, runValidators: true } // Agar mavjud bo'lmasa yarat
+    );
 }
 
-export function addSeriesEpisode(series_code, episode, link) {
-    const stmt = db.prepare(`
-        INSERT OR REPLACE INTO series_episodes (series_code, episode, link)
-        VALUES (?, ?, ?)
-    `);
-    return stmt.run(Number(series_code), Number(episode), link);
+export async function getSeriesEpisodes(series_code) {
+    return await SeriesEpisode.find({ series_code: Number(series_code) })
+        .sort({ episode: 1 }) // ASC
+        .lean();
 }
 
-export function getSeriesEpisodes(series_code) {
-    return db.prepare(`
-        SELECT * FROM series_episodes WHERE series_code = ? ORDER BY episode ASC
-    `).all(Number(series_code));
+export async function addChannel(channel) {
+    return await Channel.findOneAndUpdate(
+        { channel_id: channel.channel_id },
+        {
+            channel_id: channel.channel_id,
+            name: channel.name,
+            link: channel.link
+        },
+        { upsert: true, new: true, runValidators: true }
+    );
 }
 
-export function addChannel(channel) {
-    const stmt = db.prepare(`
-        INSERT OR IGNORE INTO channels (channel_id, name, link) VALUES (?, ?, ?)
-    `);
-    return stmt.run(channel.channel_id, channel.name, channel.link);
+export async function getChannels() {
+    return await Channel.find({}).lean();
 }
 
-export function getChannels() {
-    return db.prepare(`SELECT * FROM channels`).all();
+export async function deleteChannel(channel_id) {
+    return await Channel.deleteOne({ channel_id: channel_id });
 }
 
-export function deleteChannel(channel_id) {
-    return db.prepare(`DELETE FROM channels WHERE channel_id = ?`).run(channel_id);
-}
 
 export function isAdmin(user_id) {
     return config.ADMINS.includes(Number(user_id));
 }
 
 
-const ITEMS_PER_PAGE = 15; // Bir sahifadagi elementlar soni
+const ITEMS_PER_PAGE = 15;
 
-export function getPaginatedMovies(page = 0) {
+export async function getPaginatedMovies(page = 0) {
     const offset = page * ITEMS_PER_PAGE;
-    return db.prepare(`
-        SELECT code, title FROM movies ORDER BY code DESC LIMIT ? OFFSET ?
-    `).all(ITEMS_PER_PAGE, offset);
+    return await Movie.find({})
+        .select('code title')
+        .sort({ code: -1 }) // DESC
+        .skip(offset)
+        .limit(ITEMS_PER_PAGE)
+        .lean();
 }
 
-export function getTotalMoviePages() {
-    const totalItems = countMovies();
+export async function getTotalMoviePages() {
+    const totalItems = await countMovies();
     return Math.ceil(totalItems / ITEMS_PER_PAGE);
 }
 
-export function getPaginatedSeries(page = 0) {
+export async function getPaginatedSeries(page = 0) {
     const offset = page * ITEMS_PER_PAGE;
-    return db.prepare(`
-        SELECT code, title FROM series ORDER BY code DESC LIMIT ? OFFSET ?
-    `).all(ITEMS_PER_PAGE, offset);
+    return await Series.find({})
+        .select('code title')
+        .sort({ code: -1 }) // DESC
+        .skip(offset)
+        .limit(ITEMS_PER_PAGE)
+        .lean();
 }
 
-export function getTotalSeriesPages() {
-    const totalItems = countSeries();
+export async function getTotalSeriesPages() {
+    const totalItems = await countSeries();
     return Math.ceil(totalItems / ITEMS_PER_PAGE);
 }
-
-export default db;
