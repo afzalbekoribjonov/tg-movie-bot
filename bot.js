@@ -104,25 +104,32 @@ adminHandler(bot);
 userHandler(bot);
 
 async function startBot() {
-    await initDB();
-
     const PORT = process.env.PORT || 3000;
 
-    await bot.launch({
+    // 1. Birinchi: Renderning port scan talabini qondirish uchun HTTP serverni ishga tushirish
+    // Bu asosiy jarayonni ochiq ushlab turadi va Render portni tezda topishini ta'minlaydi.
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Bot service is active and listening for pings.');
+    });
+
+    server.listen(PORT, () => {
+        console.log(`🤖 Render Web Service uchun port ${PORT} ni tinglayapti!`);
+    });
+
+    // 2. Ikkinchi: Ma'lumotlar bazasiga ulanishni kutish
+    await initDB();
+    console.log('MongoDB ulanishi muvaffaqiyatli yakunlandi.');
+
+    // 3. Uchinchi: Telegram bilan aloqa: Long Pollingni ishga tushirish
+    // Bu fon rejimida Telegram xabarlarini qabul qiladi.
+    bot.launch({
         polling: {
             timeout: 30,
             limit: 100
         }
     });
     console.log('Telegram Long Polling faol va ishlamoqda.');
-
-
-    http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Bot service is active and listening for pings.');
-    }).listen(PORT, () => {
-        console.log(`🤖 Render Web Service uchun port ${PORT} ni tinglayapti va asosiy jarayon faol! 🎉`);
-    });
 }
 
 startBot();
@@ -133,5 +140,5 @@ process.once('SIGINT', () => {
 });
 process.once('SIGTERM', () => {
     bot.stop('SIGTERM');
-    console.log('Bot SIGTERM orqali to‘xtatildi (Lekin HTTP server asosiy sabab bo‘lishi mumkin).');
+    console.log('Bot SIGTERM orqali to‘xtatildi.');
 });
