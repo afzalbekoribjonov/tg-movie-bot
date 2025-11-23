@@ -4,7 +4,7 @@ import { userHandler } from './handlers/user.js';
 import { adminHandler } from './handlers/admin.js';
 import config from './config.js';
 import { sendMedia, escapeHTML } from './utils.js';
-import http from 'http'; // ✅ Yangi qator: HTTP server yaratish uchun
+import http from 'http';
 
 const bot = new Telegraf(config.BOT_TOKEN);
 
@@ -103,32 +103,26 @@ adminHandler(bot);
 
 userHandler(bot);
 
-// --- YENGI START BOT FUNKSIYASI ---
 async function startBot() {
-    await initDB(); // MongoDB ga ulanishni kutish
+    await initDB();
 
     const PORT = process.env.PORT || 3000;
 
-    // ✅ Render'ni 'portni tinglayapti' deb ishontirish uchun Long Polling ishlayotgan bo'lsa ham
-    // minimal HTTP serverni ishga tushiramiz.
-
-    // Oddiy HTTP server yaratish
-    http.createServer((req, res) => {
-        // Bu joyga so'rov kelsa (masalan, UptimeRobot pingi), muvaffaqiyatli javob qaytaramiz
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Bot is running (Long Polling) and server is active for Render monitoring.');
-    }).listen(PORT, () => {
-        console.log(`🤖 Bot muvaffaqiyatli ishga tushdi va port ${PORT} ni tinglayapti (RENDER Web Service uchun)! 🎉`);
-    });
-
-    // Asosiy bot logikasi - Telegram API bilan doimiy aloqa
-    // Bu, HTTP serverdan mustaqil ravishda ishlaydi.
-    bot.launch({
+    await bot.launch({
         polling: {
             timeout: 30,
             limit: 100
         }
-    }).then(() => console.log('Telegram Long Polling faol!'));
+    });
+    console.log('Telegram Long Polling faol va ishlamoqda.');
+
+
+    http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Bot service is active and listening for pings.');
+    }).listen(PORT, () => {
+        console.log(`🤖 Render Web Service uchun port ${PORT} ni tinglayapti va asosiy jarayon faol! 🎉`);
+    });
 }
 
 startBot();
@@ -139,5 +133,5 @@ process.once('SIGINT', () => {
 });
 process.once('SIGTERM', () => {
     bot.stop('SIGTERM');
-    console.log('Bot SIGTERM orqali to‘xtatildi.');
+    console.log('Bot SIGTERM orqali to‘xtatildi (Lekin HTTP server asosiy sabab bo‘lishi mumkin).');
 });
