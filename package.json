@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node bot.js",
+    "prestart": "npm rebuild better-sqlite3 --build-from-source",
     "dev": "nodemon bot.js"
   },
   "keywords": [],
