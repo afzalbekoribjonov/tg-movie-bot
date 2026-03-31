@@ -1,45 +1,7 @@
 import { getSeriesByCode, getSeriesEpisodes } from '../database.js';
-import { escapeHTML } from '../utils.js'; // HTML escape
-
-function createSerialButtons(code, episodes, page = 0) {
-    const EPISODES_PER_PAGE = 10;
-    const buttons = [];
-    const startIndex = page * EPISODES_PER_PAGE;
-    const endIndex = Math.min(startIndex + EPISODES_PER_PAGE, episodes.length);
-
-    let episodeRow = [];
-    for (let i = startIndex; i < endIndex; i++) {
-        const episodeNumber = i + 1;
-        episodeRow.push({ text: `${episodeNumber}-qism`, callback_data: `sendEp:${code}:${i}` });
-        if (episodeRow.length === 5) {
-            buttons.push(episodeRow);
-            episodeRow = [];
-        }
-    }
-    if (episodeRow.length > 0) buttons.push(episodeRow);
-
-    const paginationRow = [];
-    const totalPages = Math.ceil(episodes.length / EPISODES_PER_PAGE);
-
-    if (page > 0) {
-        paginationRow.push({ text: '« Oldingi 10', callback_data: `pageEp:${code}:${page - 1}` });
-    }
-
-    if (totalPages > 1) {
-        paginationRow.push({ text: `${page + 1}/${totalPages}`, callback_data: `ignore` });
-    }
-
-
-    if (page < totalPages - 1) {
-        paginationRow.push({ text: 'Keyingi 10 »', callback_data: `pageEp:${code}:${page + 1}` });
-    }
-
-    if (paginationRow.length > 0) {
-        buttons.push(paginationRow);
-    }
-
-    return buttons;
-}
+import { escapeHTML, sendMediaWithFallback } from '../utils.js'; // HTML escape
+import { createSerialButtons } from './serial_buttons.js';
+import { sendPremiumMessage } from './premium.js';
 
 
 export function serialHandler(bot) {
@@ -51,38 +13,37 @@ export function serialHandler(bot) {
             return next();
         }
 
-        const parts = data.split(':');
-        const type = parts[0];
-        const code = parseInt(parts[1]);
-        const value = parseInt(parts[2]);
+        try {
+            const parts = data.split(':');
+            const type = parts[0];
+            const code = parseInt(parts[1]);
+            const value = parseInt(parts[2]);
 
-        await ctx.answerCbQuery().catch(console.error);
+            await ctx.answerCbQuery().catch(console.error);
 
-        // getSeriesByCode() chaqiruvi oldiga AWAIТ qo'shildi
-        const series = await getSeriesByCode(code);
-        if (!series) return;
+            const series = await getSeriesByCode(code);
+            if (!series) return;
 
-        // getSeriesEpisodes() chaqiruvi oldiga AWAIТ qo'shildi
-        const episodes = await getSeriesEpisodes(code);
-        if (!episodes || episodes.length === 0) {
-            try {
-                if (ctx.callbackQuery.message.text) {
-                    await ctx.editMessageText('Epizodlar topilmadi.', { parse_mode: 'HTML' }).catch(console.error);
-                }
-            } catch (err) { /* pass */ }
-            return;
-        }
+            const episodes = await getSeriesEpisodes(code);
+            if (!episodes || episodes.length === 0) {
+                try {
+                    if (ctx.callbackQuery.message.text) {
+                        await ctx.editMessageText('Epizodlar topilmadi.', { parse_mode: 'HTML' }).catch(console.error);
+                    }
+                } catch (err) { /* pass */ }
+                return;
+            }
 
-        const title = escapeHTML(series.title);
-        const year = escapeHTML(String(series.year));
-        const genre = escapeHTML(series.genre || 'Yoʻq');
-        const desc = escapeHTML(series.desc || 'Tavsif yoʻq');
+            const title = escapeHTML(series.title);
+            const year = escapeHTML(String(series.year));
+            const genre = escapeHTML(series.genre || 'Yoʻq');
+            const desc = escapeHTML(series.desc || 'Tavsif yoʻq');
 
-        if (type === 'pageEp') {
-            const page = value;
-            const buttons = createSerialButtons(code, episodes, page);
+            if (type === 'pageEp') {
+                const page = value;
+                const buttons = createSerialButtons(code, episodes, page);
 
-            const message = `
+                const message = `
 📺 <b>${title}</b> (${year})
 
 <b>🎦 Janr:</b> ${genre}
@@ -92,46 +53,46 @@ export function serialHandler(bot) {
 
 <b>Iltimos, epizodni tanlang:</b>
 `;
-            const messageObj = ctx.callbackQuery.message;
+                const messageObj = ctx.callbackQuery.message;
 
-            if (messageObj.text) {
-                try {
-                    await ctx.editMessageText(message, {
-                        reply_markup: { inline_keyboard: buttons },
-                        parse_mode: 'HTML'
-                    });
-                } catch (err) {
-                    console.error('Sahifalash (Text) xabarini tahrirlashda xato:', err.message);
+                if (messageObj.text) {
+                    try {
+                        await ctx.editMessageText(message, {
+                            reply_markup: { inline_keyboard: buttons },
+                            parse_mode: 'HTML'
+                        });
+                    } catch (err) {
+                        console.error('Sahifalash (Text) xabarini tahrirlashda xato:', err.message);
+                    }
+                } else if (messageObj.caption) {
+                    try {
+                        await ctx.editMessageCaption(message, {
+                            reply_markup: { inline_keyboard: buttons },
+                            parse_mode: 'HTML'
+                        });
+                    } catch (err) {
+                        console.error('Sahifalash (Caption) xabarini tahrirlashda xato:', err.message);
+                    }
                 }
-            } else if (messageObj.caption) {
+                return;
+            }
+
+
+            if (type === 'sendEp') {
+                const episodeIndex = value;
+                const episode = episodes[episodeIndex];
+
                 try {
-                    await ctx.editMessageCaption(message, {
-                        reply_markup: { inline_keyboard: buttons },
-                        parse_mode: 'HTML'
-                    });
-                } catch (err) {
-                    console.error('Sahifalash (Caption) xabarini tahrirlashda xato:', err.message);
+                    await ctx.deleteMessage();
+                } catch (e) {
                 }
-            }
-            return;
-        }
 
 
-        if (type === 'sendEp') {
-            const episodeIndex = value;
-            const episode = episodes[episodeIndex];
+                if (!episode || !episode.link) {
+                    return ctx.reply(`<b>${title}</b> serialining ${episodeIndex + 1}-qismi uchun media topilmadi.`, { parse_mode: 'HTML' });
+                }
 
-            try {
-                await ctx.deleteMessage();
-            } catch (e) {
-            }
-
-
-            if (!episode || !episode.link) {
-                return ctx.reply(`<b>${title}</b> serialining ${episodeIndex + 1}-qismi uchun media topilmadi.`, { parse_mode: 'HTML' });
-            }
-
-            const caption = `
+                const caption = `
 📺 <b>${title}</b> (${year})
 <b>🎞️ ${episodeIndex + 1}-qism</b>
 
@@ -139,28 +100,38 @@ export function serialHandler(bot) {
 <b>📄 Tavsif:</b> <i>${desc}</i>
 `;
 
-            const allButtons = createSerialButtons(code, episodes, 0);
+                const allButtons = createSerialButtons(code, episodes, 0);
 
-            try {
-                await ctx.replyWithVideo(
-                    episode.link,
-                    {
-                        caption: caption,
-                        parse_mode: 'HTML',
+                try {
+                    await sendMediaWithFallback(ctx, episode.link, caption, {
                         reply_markup: { inline_keyboard: allButtons }
-                    }
-                );
-            } catch (error) {
-                console.error(`Serial video yuborishda xato ${code}:${episodeIndex + 1}:`, error.message);
+                    });
+                } catch (mediaError) {
+                    console.error(`Serial media yuborishda xato ${code}:${episodeIndex + 1}:`, mediaError.message);
 
-                const errorMessageText = `⚠️ Serial video yuborishda xatolik yuz berdi.
-<b>Xato:</b> <pre>${escapeHTML(error.message)}</pre>
+                    const errorMessageText = `⚠️ Serial media yuborishda xatolik yuz berdi.
+<b>Xato:</b> <pre>${escapeHTML(mediaError.message)}</pre>
 
 ${caption}
 <b>Link:</b> <code>${escapeHTML(episode.link)}</code>
 `;
-                return ctx.reply(errorMessageText, { parse_mode: 'HTML' });
+
+                    return ctx.reply(errorMessageText, { parse_mode: 'HTML' });
+                }
+
+                try {
+                    await sendPremiumMessage(ctx, code);
+                } catch (premiumError) {
+                    console.error(`Premium xabar yuborishda xato ${code}:${episodeIndex + 1}:`, premiumError.message);
+                }
             }
+        } catch (error) {
+            console.error(`Serial callbackni qayta ishlashda xato ${data}:`, error);
+
+            return ctx.reply(
+                escapeHTML('Kechirasiz, serial bo‘limlarini yuklashda muammo yuz berdi. Iltimos, birozdan keyin qayta urinib ko‘ring.'),
+                { parse_mode: 'HTML' }
+            );
         }
     });
 }

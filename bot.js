@@ -1,14 +1,17 @@
-import { Telegraf, session } from 'telegraf';
-import { initDB, getChannels, addUser, getAllMovies, checkUserExists } from './database.js';
+import { Telegraf } from 'telegraf';
+import { initDB, addUser, getRandomMovie, checkUserExists, isAdmin, getPremiumSettings } from './database.js';
 import { userHandler } from './handlers/user.js';
 import { adminHandler } from './handlers/admin.js';
+import { getCachedChannels } from './channel_cache.js';
+import { sendPremiumMessage } from './handlers/premium.js';
 import config from './config.js';
 import { sendMedia, escapeHTML } from './utils.js';
+import { persistentSession } from './persistent_session.js';
 import http from 'http';
 
 const bot = new Telegraf(config.BOT_TOKEN);
 
-bot.use(session());
+bot.use(persistentSession());
 
 bot.use((ctx, next) => {
     if (!ctx.session || typeof ctx.session !== 'object') {
@@ -17,39 +20,42 @@ bot.use((ctx, next) => {
     return next();
 });
 
-bot.use(async (ctx, next) => {
+bot.action('ignore', async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+});
 
+bot.use(async (ctx, next) => {
     if (ctx.updateType === 'callback_query') return next();
-    if (ctx.message && ctx.message.text && ctx.message.text.startsWith('/')) {
+    if (!ctx.from || isAdmin(ctx.from.id)) {
         return next();
     }
 
-    if (ctx.message && ctx.from) {
-        const channels = await getChannels();
+    if (ctx.message) {
+        const channels = await getCachedChannels();
 
         if (channels.length > 0) {
-            let allJoined = true;
-            const notJoined = [];
             const userId = ctx.from.id;
-
-            for (const channel of channels) {
-                if (!channel.channel_id) continue;
-
-                try {
-                    const member = await ctx.telegram.getChatMember(channel.channel_id, userId);
-
-                    if (['left', 'kicked'].includes(member.status)) {
-                        allJoined = false;
-                        notJoined.push(channel);
+            const membershipChecks = await Promise.all(
+                channels.map(async (channel) => {
+                    if (!channel.channel_id) {
+                        return null;
                     }
-                } catch (err) {
-                    console.error(`Obuna tekshiruvida xato ${channel.channel_id}:`, err.message);
-                    notJoined.push(channel);
-                    allJoined = false;
-                }
-            }
 
-            if (!allJoined) {
+                    try {
+                        const member = await ctx.telegram.getChatMember(channel.channel_id, userId);
+                        const isJoined = !['left', 'kicked'].includes(member.status);
+
+                        return isJoined ? null : channel;
+                    } catch (err) {
+                        console.error(`Obuna tekshiruvida xato ${channel.channel_id}:`, err.message);
+                        return channel;
+                    }
+                })
+            );
+
+            const notJoined = membershipChecks.filter(Boolean);
+
+            if (notJoined.length > 0) {
                 const text = 'Iltimos, botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling:';
                 const buttons = notJoined.map(c => [{ text: c.name, url: c.link }]);
 
@@ -62,15 +68,23 @@ bot.use(async (ctx, next) => {
 });
 
 bot.command('random', async (ctx) => {
-    const movies = await getAllMovies();
+    const movie = await getRandomMovie();
 
-    if (!movies.length) {
+    if (!movie) {
         return ctx.reply(escapeHTML('Hozircha kino mavjud emas.'), { parse_mode: 'HTML' });
     }
 
-    const movie = movies[Math.floor(Math.random() * movies.length)];
-
     await sendMedia(ctx, movie);
+});
+
+bot.command('premium', async (ctx) => {
+    const premiumSettings = await getPremiumSettings();
+
+    if (!premiumSettings.enabled) {
+        return ctx.reply(escapeHTML('Hozircha premium rejim mavjud emas.'), { parse_mode: 'HTML' });
+    }
+
+    await sendPremiumMessage(ctx);
 });
 
 bot.start(async (ctx) => {

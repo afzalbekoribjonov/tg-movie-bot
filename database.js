@@ -46,6 +46,55 @@ const ChannelSchema = new mongoose.Schema({
 });
 const Channel = mongoose.model('Channel', ChannelSchema);
 
+const PREMIUM_SETTINGS_KEY = 'default';
+
+const PremiumSettingsSchema = new mongoose.Schema({
+    singleton_key: { type: String, required: true, unique: true, default: PREMIUM_SETTINGS_KEY },
+    enabled: { type: Boolean, default: false },
+    price: { type: String, default: null },
+    card_number: { type: String, default: null },
+    card_owner: { type: String, default: null },
+    admin_username: { type: String, default: null },
+});
+const PremiumSettings = mongoose.model('PremiumSettings', PremiumSettingsSchema);
+
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+const SessionSchema = new mongoose.Schema({
+    session_key: { type: String, required: true, unique: true },
+    data: { type: mongoose.Schema.Types.Mixed, default: {} },
+    updated_at: { type: Date, default: Date.now, expires: SESSION_TTL_SECONDS },
+});
+const Session = mongoose.model('Session', SessionSchema);
+
+async function ensurePremiumSettingsSingleton() {
+    const settingsDocs = await PremiumSettings.find({}).sort({ _id: 1 }).lean();
+
+    if (settingsDocs.length <= 1) {
+        if (settingsDocs.length === 1 && settingsDocs[0].singleton_key !== PREMIUM_SETTINGS_KEY) {
+            await PremiumSettings.updateOne(
+                { _id: settingsDocs[0]._id },
+                { $set: { singleton_key: PREMIUM_SETTINGS_KEY } }
+            );
+        }
+        return;
+    }
+
+    const primaryDoc = settingsDocs.find(doc => doc.singleton_key === PREMIUM_SETTINGS_KEY) || settingsDocs[0];
+    const duplicateIds = settingsDocs
+        .filter(doc => String(doc._id) !== String(primaryDoc._id))
+        .map(doc => doc._id);
+
+    await PremiumSettings.updateOne(
+        { _id: primaryDoc._id },
+        { $set: { singleton_key: PREMIUM_SETTINGS_KEY } }
+    );
+
+    if (duplicateIds.length > 0) {
+        await PremiumSettings.deleteMany({ _id: { $in: duplicateIds } });
+    }
+}
+
 
 export async function initDB() {
     if (!config.MONGODB_URI) {
@@ -55,6 +104,7 @@ export async function initDB() {
 
     try {
         await mongoose.connect(config.MONGODB_URI);
+        await ensurePremiumSettingsSingleton();
         console.log('MongoDB ga muvaffaqiyatli ulanildi!');
         console.log('All models initialized (collections automatically created/managed).');
         return true;
@@ -121,6 +171,14 @@ export async function getMovieByCode(code) {
 
 export async function getAllMovies() {
     return await Movie.find({}).lean();
+}
+
+export async function getRandomMovie() {
+    const [movie] = await Movie.aggregate([
+        { $sample: { size: 1 } }
+    ]);
+
+    return movie || null;
 }
 
 export async function updateMovie(code, fields) {
@@ -217,6 +275,87 @@ export async function getChannels() {
 
 export async function deleteChannel(channel_id) {
     return await Channel.deleteOne({ channel_id: channel_id });
+}
+
+export async function getPremiumSettings() {
+    let settings = await PremiumSettings.findOne({ singleton_key: PREMIUM_SETTINGS_KEY }).lean();
+
+    if (!settings) {
+        const legacySettings = await PremiumSettings.findOne({}).lean();
+
+        if (legacySettings) {
+            settings = await PremiumSettings.findOneAndUpdate(
+                { _id: legacySettings._id },
+                { $set: { singleton_key: PREMIUM_SETTINGS_KEY } },
+                { new: true }
+            ).lean();
+        }
+    }
+
+    if (settings) {
+        return settings;
+    }
+
+    return {
+        enabled: false,
+        price: null,
+        card_number: null,
+        card_owner: null,
+        admin_username: null
+    };
+}
+
+export async function setPremiumSettings(fields) {
+    const updateFields = Object.fromEntries(
+        Object.entries({
+            enabled: fields.enabled,
+            price: fields.price,
+            card_number: fields.card_number,
+            card_owner: fields.card_owner,
+            admin_username: fields.admin_username
+        }).filter(([, value]) => value !== undefined)
+    );
+
+    return await PremiumSettings.findOneAndUpdate(
+        { singleton_key: PREMIUM_SETTINGS_KEY },
+        {
+            $set: updateFields,
+            $setOnInsert: { singleton_key: PREMIUM_SETTINGS_KEY }
+        },
+        {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true
+        }
+    ).lean();
+}
+
+export async function getSession(sessionKey) {
+    const session = await Session.findOne({ session_key: sessionKey })
+        .select('data')
+        .lean();
+
+    return session?.data ?? null;
+}
+
+export async function saveSession(sessionKey, data) {
+    return await Session.findOneAndUpdate(
+        { session_key: sessionKey },
+        {
+            session_key: sessionKey,
+            data,
+            updated_at: new Date()
+        },
+        {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true
+        }
+    );
+}
+
+export async function deleteSession(sessionKey) {
+    return await Session.deleteOne({ session_key: sessionKey });
 }
 
 

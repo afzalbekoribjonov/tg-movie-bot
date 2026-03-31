@@ -2,17 +2,18 @@ import {
     addMovie, getMovieByCode, addSeries, addSeriesEpisode, getSeriesByCode,
     getChannels, addChannel, deleteChannel, isAdmin, deleteMovie, deleteSeries,
     updateMovie, updateSeries, getSeriesEpisodes, deleteSeriesEpisode,
-    getAllUserIds
+    getAllUserIds, getPremiumSettings, setPremiumSettings
 } from '../database.js';
 import { adminCommandsHandler } from './admin_commands.js';
 import { sendEditDeleteMenu } from './admin_panel_utils.js';
 import { getStatsMenuData, createListMenuData } from './admin_stats.js';
+import { invalidateChannelsCache } from '../channel_cache.js';
+import { escapeHTML } from '../utils.js';
 
-async function sendBroadcastAdvanced(bot, message) {
-    const userIds = await getAllUserIds();
-    let successCount = 0;
-    let failCount = 0;
+const BROADCAST_CONCURRENCY = 5;
+const BROADCAST_DELAY_MS = 50;
 
+async function sendBroadcastToUser(bot, userId, message) {
     const isText = !!message.text;
     const isPhoto = !!message.photo;
     const isVideo = !!message.video;
@@ -28,33 +29,158 @@ async function sendBroadcastAdvanced(bot, message) {
         reply_markup: replyMarkup
     };
 
-    for (const userId of userIds) {
-        try {
-            if (isPhoto) {
-                const fileId = message.photo[message.photo.length - 1].file_id;
-                await bot.telegram.sendPhoto(userId, fileId, { caption: caption, ...extra });
-            } else if (isVideo) {
-                await bot.telegram.sendVideo(userId, message.video.file_id, { caption: caption, ...extra });
-            } else if (isDocument) {
-                await bot.telegram.sendDocument(userId, message.document.file_id, { caption: caption, ...extra });
-            } else if (isText) {
-                await bot.telegram.sendMessage(userId, caption, extra);
-            } else if (!isMedia && !isText) {
-                continue;
-            }
-            successCount++;
-        } catch (error) {
-            if (error.message.includes('bot was blocked by the user') || error.message.includes('CHAT_ID_INVALID') || error.message.includes('user is deactivated')) {
-                failCount++;
-            } else {
-                failCount++;
-                console.error(`Broadcast xato (ID: ${userId}):`, error.message);
-            }
-        }
-        await new Promise(resolve => setTimeout(resolve, 50));
+    if (isPhoto) {
+        const fileId = message.photo[message.photo.length - 1].file_id;
+        await bot.telegram.sendPhoto(userId, fileId, { caption: caption, ...extra });
+        return true;
     }
 
+    if (isVideo) {
+        await bot.telegram.sendVideo(userId, message.video.file_id, { caption: caption, ...extra });
+        return true;
+    }
+
+    if (isDocument) {
+        await bot.telegram.sendDocument(userId, message.document.file_id, { caption: caption, ...extra });
+        return true;
+    }
+
+    if (isText) {
+        await bot.telegram.sendMessage(userId, caption, extra);
+        return true;
+    }
+
+    if (!isMedia && !isText) {
+        return false;
+    }
+
+    return false;
+}
+
+async function sendBroadcastAdvanced(bot, message) {
+    const userIds = await getAllUserIds();
+    let successCount = 0;
+    let failCount = 0;
+    let nextIndex = 0;
+
+    async function worker() {
+        while (nextIndex < userIds.length) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+
+            const userId = userIds[currentIndex];
+
+            try {
+                const sent = await sendBroadcastToUser(bot, userId, message);
+                if (sent) {
+                    successCount++;
+                }
+            } catch (error) {
+                failCount++;
+
+                if (
+                    !error.message.includes('bot was blocked by the user') &&
+                    !error.message.includes('CHAT_ID_INVALID') &&
+                    !error.message.includes('user is deactivated')
+                ) {
+                    console.error(`Broadcast xato (ID: ${userId}):`, error.message);
+                }
+            }
+
+            if (BROADCAST_DELAY_MS > 0) {
+                await new Promise(resolve => setTimeout(resolve, BROADCAST_DELAY_MS));
+            }
+        }
+    }
+
+    const workerCount = Math.min(BROADCAST_CONCURRENCY, Math.max(userIds.length, 1));
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
     return { total: userIds.length, sent: successCount, failed: failCount };
+}
+
+function getAdminPanelKeyboard() {
+    return [
+        [{ text: '➕ Kino qo‘shish', callback_data: 'admin:add_movie' }, { text: '➕ Serial qo‘shish', callback_data: 'admin:add_series' }],
+        [{ text: '✏️ Kino/Serialni tahrirlash', callback_data: 'admin:edit_item' }],
+        [{ text: '📊 Statistika va ro‘yxat', callback_data: 'admin:show_stats' }],
+        [{ text: '💎 Premium rejim', callback_data: 'admin:premium' }],
+        [{ text: '📢 Kanal boshqaruvi', callback_data: 'admin:channels' }],
+        [{ text: '📨 Xabar yuborish (Broadcast)', callback_data: 'admin:broadcast' }]
+    ];
+}
+
+function formatPremiumValue(value, fallback = 'Kiritilmagan') {
+    return escapeHTML(value || fallback);
+}
+
+function buildPremiumSettingsMessage(settings) {
+    const statusText = settings.enabled ? 'Yoqilgan' : 'O‘chirilgan';
+
+    return `
+💎 <b>Yopiq kanal premium sozlamalari</b>
+
+<b>Holat:</b> ${escapeHTML(statusText)}
+<b>Kanal narxi:</b> ${formatPremiumValue(settings.price)}
+<b>Karta raqami:</b> <code>${formatPremiumValue(settings.card_number)}</code>
+<b>Karta egasi:</b> ${formatPremiumValue(settings.card_owner)}
+<b>Admin username:</b> @${formatPremiumValue(settings.admin_username, 'admin')}
+`;
+}
+
+function getPremiumSettingsKeyboard(isEnabled) {
+    const buttons = [];
+
+    if (isEnabled) {
+        buttons.push([
+            { text: '✏️ Tahrirlash', callback_data: 'admin:premium_edit' },
+            { text: '⛔ O‘chirish', callback_data: 'admin:premium_disable' }
+        ]);
+    } else {
+        buttons.push([
+            { text: '✅ Yoqish', callback_data: 'admin:premium_enable' }
+        ]);
+    }
+
+    buttons.push([
+        { text: '🔙 Admin panel', callback_data: 'admin:menu' }
+    ]);
+
+    return buttons;
+}
+
+async function showPremiumSettingsMenu(ctx) {
+    const premiumSettings = await getPremiumSettings();
+    ctx.session.adminStep = null;
+    ctx.session.premiumDraft = null;
+
+    return ctx.editMessageText(
+        buildPremiumSettingsMessage(premiumSettings),
+        {
+            parse_mode: 'HTML',
+            reply_markup: {
+                inline_keyboard: getPremiumSettingsKeyboard(premiumSettings.enabled)
+            }
+        }
+    );
+}
+
+async function startPremiumSetup(ctx, title) {
+    const premiumSettings = await getPremiumSettings();
+
+    ctx.session.adminStep = 'premium_price';
+    ctx.session.premiumDraft = {
+        price: premiumSettings.price ?? '',
+        card_number: premiumSettings.card_number ?? '',
+        card_owner: premiumSettings.card_owner ?? '',
+        admin_username: premiumSettings.admin_username ?? ''
+    };
+    ctx.session.editItem = null;
+
+    return ctx.editMessageText(
+        `💎 <b>${escapeHTML(title)}</b>\n\n<b>Joriy kanal narxi:</b> ${formatPremiumValue(premiumSettings.price)}\n\nKanalga qo‘shilish narxini kiriting:`,
+        { parse_mode: 'HTML' }
+    );
 }
 
 export function adminHandler(bot) {
@@ -68,13 +194,7 @@ export function adminHandler(bot) {
             'Admin panelga xush kelibsiz 👑',
             {
                 reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '➕ Kino qo‘shish', callback_data: 'admin:add_movie' }, { text: '➕ Serial qo‘shish', callback_data: 'admin:add_series' }],
-                        [{ text: '✏️ Kino/Serialni tahrirlash', callback_data: 'admin:edit_item' }],
-                        [{ text: '📊 Statistika va ro‘yxat', callback_data: 'admin:show_stats' }],
-                        [{ text: '📢 Kanal boshqaruvi', callback_data: 'admin:channels' }],
-                        [{ text: '📨 Xabar yuborish (Broadcast)', callback_data: 'admin:broadcast' }]
-                    ]
+                    inline_keyboard: getAdminPanelKeyboard()
                 }
             }
         );
@@ -105,9 +225,7 @@ export function adminHandler(bot) {
             `);
         }
 
-        if (ctx.message.text) {
-            return next();
-        }
+        return next();
     });
 
     bot.on('callback_query', async (ctx, next) => {
@@ -127,7 +245,15 @@ export function adminHandler(bot) {
         if (action === 'admin') {
             const adminAction = params[0];
 
-            if (adminAction === 'add_movie') {
+            if (adminAction === 'menu') {
+                ctx.session.adminStep = null;
+                ctx.session.premiumDraft = null;
+                return ctx.editMessageText('Admin panelga xush kelibsiz 👑', {
+                    reply_markup: {
+                        inline_keyboard: getAdminPanelKeyboard()
+                    }
+                });
+            } else if (adminAction === 'add_movie') {
                 ctx.session.adminStep = 'add_movie_code';
                 return ctx.editMessageText('Kino kodini kiriting (Masalan: 1001):');
             } else if (adminAction === 'add_series') {
@@ -159,6 +285,15 @@ export function adminHandler(bot) {
                 else channels.forEach(c => { msg += `🔹 ${c.name} — ${c.channel_id} (${c.link})\n`; });
                 msg += '\n➕ Qo‘shish: /addchannel\n➖ O‘chirish: /delchannel';
                 return ctx.editMessageText(msg);
+            } else if (adminAction === 'premium') {
+                return showPremiumSettingsMenu(ctx);
+            } else if (adminAction === 'premium_enable') {
+                return startPremiumSetup(ctx, 'Premium rejimni yoqish');
+            } else if (adminAction === 'premium_edit') {
+                return startPremiumSetup(ctx, 'Premium sozlamalarini tahrirlash');
+            } else if (adminAction === 'premium_disable') {
+                await setPremiumSettings({ enabled: false });
+                return showPremiumSettingsMenu(ctx);
             }
         }
 
@@ -167,6 +302,7 @@ export function adminHandler(bot) {
             const result = await deleteChannel(channelId);
 
             if (result?.deletedCount > 0) {
+                invalidateChannelsCache();
                 await ctx.editMessageText(`✅ Kanal (${channelId}) muvaffaqiyatli o‘chirildi!`).catch(console.error);
             } else {
                 await ctx.editMessageText(`⚠️ Kanal (${channelId}) o‘chirishda xatolik yuz berdi yoki u topilmadi.`).catch(console.error);
@@ -229,6 +365,71 @@ export function adminHandler(bot) {
 
         const step = ctx.session.adminStep;
         if (!step) { return next(); }
+
+        if (step === 'premium_price') {
+            if (!text) return ctx.reply('Kanalga qo‘shilish narxini kiriting.');
+
+            ctx.session.premiumDraft = {
+                ...(ctx.session.premiumDraft || {}),
+                price: text
+            };
+            ctx.session.adminStep = 'premium_card_number';
+
+            return ctx.reply('Karta raqamini kiriting:');
+        }
+
+        if (step === 'premium_card_number') {
+            if (!text) return ctx.reply('Karta raqamini kiriting.');
+
+            ctx.session.premiumDraft = {
+                ...(ctx.session.premiumDraft || {}),
+                card_number: text
+            };
+            ctx.session.adminStep = 'premium_card_owner';
+
+            return ctx.reply('Karta egasi ismini kiriting:');
+        }
+
+        if (step === 'premium_card_owner') {
+            if (!text) return ctx.reply('Karta egasi ismini kiriting.');
+
+            ctx.session.premiumDraft = {
+                ...(ctx.session.premiumDraft || {}),
+                card_owner: text
+            };
+            ctx.session.adminStep = 'premium_admin_username';
+
+            return ctx.reply('Admin username kiriting (Masalan: kinobot_admin yoki @kinobot_admin):');
+        }
+
+        if (step === 'premium_admin_username') {
+            const normalizedUsername = text.replace(/^@+/, '').trim();
+            if (!normalizedUsername) {
+                return ctx.reply('Admin username noto‘g‘ri. Iltimos, qaytadan kiriting.');
+            }
+
+            ctx.session.premiumDraft = {
+                ...(ctx.session.premiumDraft || {}),
+                admin_username: normalizedUsername
+            };
+
+            const premiumDraft = ctx.session.premiumDraft;
+
+            await setPremiumSettings({
+                enabled: true,
+                price: premiumDraft.price,
+                card_number: premiumDraft.card_number,
+                card_owner: premiumDraft.card_owner,
+                admin_username: premiumDraft.admin_username
+            });
+
+            ctx.session.adminStep = null;
+            ctx.session.premiumDraft = null;
+
+            return ctx.reply(
+                `✅ Premium sozlamalari saqlandi!\n\n💰 Narx: ${premiumDraft.price}\n💳 Karta: ${premiumDraft.card_number}\n👤 Egasi: ${premiumDraft.card_owner}\n📨 Admin: @${premiumDraft.admin_username}`
+            );
+        }
 
         if (step === 'edit_item_code') {
             if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat raqamli kod kiriting.');
@@ -436,6 +637,7 @@ export function adminHandler(bot) {
                 case 'add_channel_link':
                     ctx.session.newChannel.link = text;
                     await addChannel(ctx.session.newChannel);
+                    invalidateChannelsCache();
 
                     ctx.session.adminStep = null;
                     ctx.session.newChannel = null;

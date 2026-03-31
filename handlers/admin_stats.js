@@ -25,7 +25,8 @@ export async function getStatsMenuData() {
 
     const buttons = [
         [{ text: '🎬 Kinolar ro‘yxati', callback_data: 'admin:list:movie:0' }], // Callback: admin:list:type:page
-        [{ text: '📺 Seriallar ro‘yxati', callback_data: 'admin:list:series:0' }] // Callback: admin:list:type:page
+        [{ text: '📺 Seriallar ro‘yxati', callback_data: 'admin:list:series:0' }], // Callback: admin:list:type:page
+        [{ text: '🔙 Admin panel', callback_data: 'admin:menu' }]
     ];
 
     return { message, buttons };
