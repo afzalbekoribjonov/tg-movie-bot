@@ -4,6 +4,7 @@ import { userHandler } from './handlers/user.js';
 import { adminHandler } from './handlers/admin.js';
 import { getCachedChannels } from './channel_cache.js';
 import { sendPremiumMessage } from './handlers/premium.js';
+import { handleNumericCodeLookup } from './handlers/code_lookup.js';
 import config from './config.js';
 import { sendMedia, escapeHTML } from './utils.js';
 import { persistentSession } from './persistent_session.js';
@@ -91,10 +92,16 @@ bot.start(async (ctx) => {
     const userId = ctx.from.id;
     const username = ctx.from.username || null;
     const firstName = ctx.from.first_name || 'Foydalanuvchi';
+    const rawText = ctx.message?.text || '';
+    const startPayload = rawText.replace(/^\/start(@\w+)?\s*/i, '').trim();
 
     const userAlreadyExists = await checkUserExists(userId);
 
     await addUser(userId, username, firstName);
+
+    if (/^\d+$/.test(startPayload)) {
+        return handleNumericCodeLookup(ctx, startPayload);
+    }
 
     let welcomeMessage;
 

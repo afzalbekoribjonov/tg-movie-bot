@@ -66,6 +66,7 @@ async function sendMediaByType(ctx, link, caption, mediaType, options = {}) {
         ...options,
         caption,
         parse_mode: 'HTML',
+        protect_content: true,
     };
 
     if (mediaType === 'photo') {
