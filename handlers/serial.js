@@ -1,8 +1,8 @@
 import { getSeriesByCode, getSeriesEpisodes } from '../database.js';
-import { escapeHTML, sendMediaWithFallback } from '../utils.js'; // HTML escape
+import { escapeHTML, sendStoredMedia, buildItemCaption } from '../utils.js';
 import { createSerialButtons } from './serial_buttons.js';
 import { sendPremiumMessage } from './premium.js';
-
+import { appendKeyboardRow, getShareButtonRow } from './share.js';
 
 export function serialHandler(bot) {
 
@@ -28,9 +28,9 @@ export function serialHandler(bot) {
             if (!episodes || episodes.length === 0) {
                 try {
                     if (ctx.callbackQuery.message.text) {
-                        await ctx.editMessageText('Epizodlar topilmadi.', { parse_mode: 'HTML' }).catch(console.error);
+                        await ctx.editMessageText('Qismlar topilmadi.', { parse_mode: 'HTML' }).catch(console.error);
                     }
-                } catch (err) { /* pass */ }
+                } catch (err) { }
                 return;
             }
 
@@ -41,42 +41,18 @@ export function serialHandler(bot) {
 
             if (type === 'pageEp') {
                 const page = value;
-                const buttons = createSerialButtons(code, episodes, page);
+                const buttons = appendKeyboardRow(
+                    createSerialButtons(code, episodes, page),
+                    getShareButtonRow('series', code)
+                );
 
-                const message = `
-📺 <b>${title}</b> (${year})
-
-<b>🎦 Janr:</b> ${genre}
-<b>📄 Tavsif:</b> <i>${desc}</i>
-
-<b>Bo'limlar soni:</b> ${episodes.length}
-
-<b>Iltimos, epizodni tanlang:</b>
-`;
-                const messageObj = ctx.callbackQuery.message;
-
-                if (messageObj.text) {
-                    try {
-                        await ctx.editMessageText(message, {
-                            reply_markup: { inline_keyboard: buttons },
-                            parse_mode: 'HTML'
-                        });
-                    } catch (err) {
-                        console.error('Sahifalash (Text) xabarini tahrirlashda xato:', err.message);
-                    }
-                } else if (messageObj.caption) {
-                    try {
-                        await ctx.editMessageCaption(message, {
-                            reply_markup: { inline_keyboard: buttons },
-                            parse_mode: 'HTML'
-                        });
-                    } catch (err) {
-                        console.error('Sahifalash (Caption) xabarini tahrirlashda xato:', err.message);
-                    }
+                try {
+                    await ctx.editMessageReplyMarkup({ inline_keyboard: buttons });
+                } catch (err) {
+                    console.error('Sahifalash tugmalarini yangilashda xato:', err.message);
                 }
                 return;
             }
-
 
             if (type === 'sendEp') {
                 const episodeIndex = value;
@@ -87,33 +63,35 @@ export function serialHandler(bot) {
                 } catch (e) {
                 }
 
-
-                if (!episode || !episode.link) {
-                    return ctx.reply(`<b>${title}</b> serialining ${episodeIndex + 1}-qismi uchun media topilmadi.`, { parse_mode: 'HTML' });
+                if (!episode || (!episode.file_id && !episode.link)) {
+                    return ctx.reply(`<b>${title}</b> serialining ${episodeIndex + 1}-qismi uchun video, rasm yoki fayl topilmadi.`, { parse_mode: 'HTML' });
                 }
 
-                const caption = `
-📺 <b>${title}</b> (${year})
+                const caption = `${buildItemCaption(series, '📺')}
 <b>🎞️ ${episodeIndex + 1}-qism</b>
-
-<b>🎦 Janr:</b> ${genre}
-<b>📄 Tavsif:</b> <i>${desc}</i>
 `;
 
-                const allButtons = createSerialButtons(code, episodes, 0);
+                const allButtons = appendKeyboardRow(
+                    createSerialButtons(code, episodes, 0),
+                    getShareButtonRow('series', code)
+                );
 
                 try {
-                    await sendMediaWithFallback(ctx, episode.link, caption, {
+                    await sendStoredMedia(ctx, episode, caption, {
                         reply_markup: { inline_keyboard: allButtons }
                     });
                 } catch (mediaError) {
                     console.error(`Serial media yuborishda xato ${code}:${episodeIndex + 1}:`, mediaError.message);
 
-                    const errorMessageText = `⚠️ Serial media yuborishda xatolik yuz berdi.
+                    const sourceText = episode.file_id
+                        ? `<b>Saqlangan fayl:</b> <code>${escapeHTML(episode.file_id)}</code>`
+                        : `<b>Link:</b> <code>${escapeHTML(episode.link)}</code>`;
+
+                    const errorMessageText = `⚠️ Serial qismini yuborishda muammo bo‘ldi.
 <b>Xato:</b> <pre>${escapeHTML(mediaError.message)}</pre>
 
 ${caption}
-<b>Link:</b> <code>${escapeHTML(episode.link)}</code>
+${sourceText}
 `;
 
                     return ctx.reply(errorMessageText, { parse_mode: 'HTML' });

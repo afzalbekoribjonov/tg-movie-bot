@@ -1,4 +1,4 @@
-import { getChannels } from './database.js';
+import { getChannels, recordDatabaseOperationError } from './database.js';
 
 const CHANNELS_CACHE_TTL_MS = 30 * 1000;
 
@@ -12,10 +12,16 @@ export async function getCachedChannels() {
         return cachedChannels;
     }
 
-    cachedChannels = await getChannels();
-    cacheExpiresAt = now + CHANNELS_CACHE_TTL_MS;
-
-    return cachedChannels;
+    try {
+        cachedChannels = await getChannels();
+        cacheExpiresAt = now + CHANNELS_CACHE_TTL_MS;
+        return cachedChannels;
+    } catch (error) {
+        recordDatabaseOperationError(error);
+        cachedChannels = [];
+        cacheExpiresAt = now + 5 * 1000;
+        return cachedChannels;
+    }
 }
 
 export function invalidateChannelsCache() {

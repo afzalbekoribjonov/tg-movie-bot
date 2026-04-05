@@ -16,7 +16,7 @@ export function userHandler(bot) {
         }
 
         if (!/^\d+$/.test(text)) {
-            return ctx.reply(escapeHTML('Iltimos, raqamli kod yuboring!'), { parse_mode: 'HTML' });
+            return ctx.reply(escapeHTML('Iltimos, faqat raqamli kod yuboring.'), { parse_mode: 'HTML' });
         }
 
         return handleNumericCodeLookup(ctx, text);
@@ -38,7 +38,7 @@ export function userHandler(bot) {
             const premiumSettings = await getPremiumSettings();
 
             if (!premiumSettings.enabled) {
-                return ctx.editMessageText('💎 Premium rejim hozircha faol emas.');
+                return ctx.editMessageText('💎 Yopiq bo‘lim hozircha ochilmagan.');
             }
 
             const priceText = escapeHTML(premiumSettings.price || 'Narx admin tomonidan belgilanadi');
@@ -76,7 +76,7 @@ ${cardOwner}
             const premiumSettings = await getPremiumSettings();
 
             if (!premiumSettings.enabled) {
-                return ctx.editMessageText('💎 Premium rejim hozircha faol emas.');
+                return ctx.editMessageText('💎 Yopiq bo‘lim hozircha ochilmagan.');
             }
 
             const adminUsername = escapeHTML((premiumSettings.admin_username || 'admin').replace(/^@+/, ''));

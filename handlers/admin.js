@@ -2,16 +2,24 @@ import {
     addMovie, getMovieByCode, addSeries, addSeriesEpisode, getSeriesByCode,
     getChannels, addChannel, deleteChannel, isAdmin, deleteMovie, deleteSeries,
     updateMovie, updateSeries, getSeriesEpisodes, deleteSeriesEpisode,
-    getAllUserIds, getPremiumSettings, setPremiumSettings
+    getAllUserIds, getPremiumSettings, setPremiumSettings,
+    getPromoChannelSettings, setPromoChannelSettings, clearPromoChannelSettings
 } from '../database.js';
 import { adminCommandsHandler } from './admin_commands.js';
 import { sendEditDeleteMenu } from './admin_panel_utils.js';
 import { getStatsMenuData, createListMenuData } from './admin_stats.js';
 import { invalidateChannelsCache } from '../channel_cache.js';
-import { escapeHTML } from '../utils.js';
+import { escapeHTML, extractTelegramMedia } from '../utils.js';
 
 const BROADCAST_CONCURRENCY = 5;
 const BROADCAST_DELAY_MS = 50;
+const SERIES_UPLOAD_FINISH_CALLBACK = 'admin:finish_series_upload';
+const PROMO_PUBLISH_CALLBACK = 'admin:promo_publish';
+const PROMO_EDIT_CAPTION_CALLBACK = 'admin:promo_edit_caption';
+const PROMO_EDIT_BUTTONS_CALLBACK = 'admin:promo_edit_buttons';
+const PROMO_CANCEL_CALLBACK = 'admin:promo_cancel';
+const PROMO_CHANNEL_CLEAR_CALLBACK = 'admin:promo_clear_channel';
+const PROMO_BUTTON_MODE_PREFIX = 'admin:promo_btnmode';
 
 async function sendBroadcastToUser(bot, userId, message) {
     const isText = !!message.text;
@@ -103,10 +111,11 @@ function getAdminPanelKeyboard() {
     return [
         [{ text: '➕ Kino qo‘shish', callback_data: 'admin:add_movie' }, { text: '➕ Serial qo‘shish', callback_data: 'admin:add_series' }],
         [{ text: '✏️ Kino/Serialni tahrirlash', callback_data: 'admin:edit_item' }],
+        [{ text: '📣 Reklama postlari', callback_data: 'admin:promo_menu' }],
         [{ text: '📊 Statistika va ro‘yxat', callback_data: 'admin:show_stats' }],
         [{ text: '💎 Premium rejim', callback_data: 'admin:premium' }],
         [{ text: '📢 Kanal boshqaruvi', callback_data: 'admin:channels' }],
-        [{ text: '📨 Xabar yuborish (Broadcast)', callback_data: 'admin:broadcast' }]
+        [{ text: '📨 Hammaga xabar yuborish', callback_data: 'admin:broadcast' }]
     ];
 }
 
@@ -149,6 +158,495 @@ function getPremiumSettingsKeyboard(isEnabled) {
     return buttons;
 }
 
+
+function normalizeChannelTarget(value) {
+    const raw = String(value || '').trim();
+
+    if (!raw) {
+        return null;
+    }
+
+    if (/^-?\d+$/.test(raw)) {
+        return raw;
+    }
+
+    const usernameMatch = raw.match(/^(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]{4,})\/?$/i);
+    if (usernameMatch) {
+        return `@${usernameMatch[1]}`;
+    }
+
+    if (/^@[A-Za-z0-9_]{4,}$/.test(raw)) {
+        return raw;
+    }
+
+    return null;
+}
+
+function extractPromoMedia(message) {
+    if (!message) {
+        return null;
+    }
+
+    if (Array.isArray(message.photo) && message.photo.length > 0) {
+        const bestPhoto = message.photo[message.photo.length - 1];
+        return {
+            media_type: 'photo',
+            file_id: bestPhoto.file_id,
+            file_unique_id: bestPhoto.file_unique_id || null,
+        };
+    }
+
+    if (message.video) {
+        return {
+            media_type: 'video',
+            file_id: message.video.file_id,
+            file_unique_id: message.video.file_unique_id || null,
+        };
+    }
+
+    return null;
+}
+
+function getPromoDefaultButton(itemType, code, botUsername) {
+    const safeCode = String(code || '').trim();
+    const safeBotUsername = String(botUsername || '').trim();
+
+    if (!safeCode || !safeBotUsername) {
+        return null;
+    }
+
+    return {
+        text: itemType === 'series' ? '📺 Serialni ko‘rish' : '🎬 Kino ko‘rish',
+        url: `https://t.me/${safeBotUsername}?start=${safeCode}`,
+    };
+}
+
+function getPromoMediaStepText() {
+    return 'Endi reklama posti uchun rasm yoki qisqa video yuboring.\n\nAgar tayyor kanal postingiz bo‘lsa, uni botga uzatib yuborsangiz rasm/video va matn avtomatik olinadi.';
+}
+
+function getPromoButtonsStepText() {
+    return `Qo‘shimcha URL tugmalarni yuboring.
+Har qatorda 1-3 ta tugma bo‘lishi mumkin.
+
+Namuna:
+Kanal - https://t.me/kanalim
+Treyler - https://example.com | Instagram - https://instagram.com/kanalim
+
+Tugma kerak bo‘lmasa: skip`;
+}
+
+function getPromoChannelButton(promoChannel) {
+    const channelUrl = promoChannel?.promo_channel_link || (promoChannel?.promo_channel_username ? `https://t.me/${promoChannel.promo_channel_username}` : null);
+
+    if (!channelUrl) {
+        return null;
+    }
+
+    return {
+        text: '📢 Kanalga o‘tish',
+        url: channelUrl,
+    };
+}
+
+function getPromoButtonsModeText(promoChannel) {
+    const hasChannelButton = Boolean(getPromoChannelButton(promoChannel));
+
+    return `🔘 <b>Promo tugmalari</b>
+
+Asosiy <b>“${promoChannel ? 'Kino ko‘rish / Serialni ko‘rish' : 'Ko‘rish'}”</b> tugmasi avtomatik qo‘shiladi.
+${hasChannelButton ? 'Quyidan tez variant tanlang yoki qo‘lda tugma yozish rejimiga o‘ting.' : 'Kanal username bo‘lmagani uchun tez “Kanalga o‘tish” tugmasi yashirin. Kerak bo‘lsa qo‘lda URL tugma yozishingiz mumkin.'}`;
+}
+
+function getPromoButtonsModeKeyboard(promoChannel) {
+    const hasChannelButton = Boolean(getPromoChannelButton(promoChannel));
+    const rows = [
+        [{ text: '✅ Faqat asosiy tugma', callback_data: `${PROMO_BUTTON_MODE_PREFIX}:default` }],
+    ];
+
+    if (hasChannelButton) {
+        rows.push([{ text: '📢 Kanal + asosiy tugma', callback_data: `${PROMO_BUTTON_MODE_PREFIX}:channel` }]);
+    }
+
+    rows.push([{ text: '🎞 Treyler + asosiy tugma', callback_data: `${PROMO_BUTTON_MODE_PREFIX}:trailer` }]);
+
+    if (hasChannelButton) {
+        rows.push([{ text: '📢 Kanal + 🎞 Treyler', callback_data: `${PROMO_BUTTON_MODE_PREFIX}:channel_trailer` }]);
+    }
+
+    rows.push([{ text: '✍️ Tugmalarni qo‘lda yozish', callback_data: `${PROMO_BUTTON_MODE_PREFIX}:custom` }]);
+    rows.push([{ text: '❌ Bekor qilish', callback_data: PROMO_CANCEL_CALLBACK }]);
+
+    return rows;
+}
+
+function parseSinglePromoButton(text, defaultText = '🎞 Treyler') {
+    const raw = String(text || '').trim();
+
+    if (!raw || /^skip$/i.test(raw) || raw === '-') {
+        throw new Error('URL yuboring yoki qo‘lda tugma yozish rejimini tanlang.');
+    }
+
+    if (/^(https?:\/\/\S+|tg:\/\/\S+|t\.me\/\S+)$/i.test(raw)) {
+        const normalizedUrl = /^t\.me\//i.test(raw) ? `https://${raw}` : raw;
+        return { text: defaultText, url: normalizedUrl };
+    }
+
+    const rows = parsePromoButtons(raw);
+    if (rows.length !== 1 || rows[0].length !== 1) {
+        throw new Error('Bu tez rejimda bitta tugma yuboring. Masalan: https://example.com yoki Treyler - https://example.com');
+    }
+
+    return rows[0][0];
+}
+
+function buildQuickPromoButtons(mode, promoChannel, inputText) {
+    const channelButton = getPromoChannelButton(promoChannel);
+
+    if (mode === 'default') {
+        return [];
+    }
+
+    if (mode === 'channel') {
+        if (!channelButton) {
+            throw new Error('Kanal tez tugmasi uchun kanal username yoki public link topilmadi.');
+        }
+        return [[channelButton]];
+    }
+
+    const trailerButton = parseSinglePromoButton(inputText);
+
+    if (mode === 'trailer') {
+        return [[trailerButton]];
+    }
+
+    if (mode === 'channel_trailer') {
+        if (!channelButton) {
+            throw new Error('Kanal tez tugmasi uchun kanal username yoki public link topilmadi.');
+        }
+        return [[channelButton, trailerButton]];
+    }
+
+    throw new Error('Noma’lum promo tugma rejimi.');
+}
+
+async function promptPromoButtonsMode(ctx) {
+    const promoChannel = await getPromoChannelSettings();
+    const message = getPromoButtonsModeText(promoChannel);
+    const replyMarkup = { inline_keyboard: getPromoButtonsModeKeyboard(promoChannel) };
+
+    if (ctx.updateType === 'callback_query') {
+        return ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: replyMarkup });
+    }
+
+    return ctx.reply(message, { parse_mode: 'HTML', reply_markup: replyMarkup });
+}
+
+function parsePromoButtons(text) {
+    const raw = String(text || '').trim();
+
+    if (!raw || /^skip$/i.test(raw) || raw === '-') {
+        return [];
+    }
+
+    const rows = raw
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+
+    if (rows.length > 8) {
+        throw new Error('Tugmalar qatori 8 tadan oshmasin.');
+    }
+
+    return rows.map((row) => {
+        const buttonSpecs = row
+            .split('|')
+            .map(part => part.trim())
+            .filter(Boolean);
+
+        if (buttonSpecs.length === 0) {
+            throw new Error('Bo‘sh tugma qatori yuborildi.');
+        }
+
+        if (buttonSpecs.length > 3) {
+            throw new Error('Bir qatorda ko‘pi bilan 3 ta tugma bo‘lsin.');
+        }
+
+        return buttonSpecs.map((spec) => {
+            const match = spec.match(/^(.+?)\s*(?:-|=|:)\s*(https?:\/\/\S+|tg:\/\/\S+|t\.me\/\S+)$/i);
+            if (!match) {
+                throw new Error('Tugma formati noto‘g‘ri. Namuna: Kanal - https://t.me/kanalim');
+            }
+
+            let url = match[2].trim();
+            if (/^t\.me\//i.test(url)) {
+                url = `https://${url}`;
+            }
+
+            return {
+                text: match[1].trim().slice(0, 64),
+                url,
+            };
+        });
+    });
+}
+
+function buildPromoKeyboard(promoDraft, botUsername) {
+    const keyboard = [];
+    const defaultButton = getPromoDefaultButton(promoDraft?.itemType, promoDraft?.code, botUsername);
+
+    if (defaultButton) {
+        keyboard.push([defaultButton]);
+    }
+
+    if (Array.isArray(promoDraft?.customButtons) && promoDraft.customButtons.length > 0) {
+        keyboard.push(...promoDraft.customButtons);
+    }
+
+    return keyboard.length > 0
+        ? { inline_keyboard: keyboard }
+        : undefined;
+}
+
+function buildPromoMenuMessage(settings) {
+    const linkedText = settings?.promo_channel_id
+        ? `✅ <b>Ulangan</b>\n<b>Kanal:</b> ${escapeHTML(settings.promo_channel_title || settings.promo_channel_id)}\n<b>Manzil:</b> <code>${escapeHTML(settings.promo_channel_id)}</code>${settings.promo_channel_link ? `\n<b>Link:</b> ${escapeHTML(settings.promo_channel_link)}` : ''}`
+        : '⚠️ <b>Asosiy promo kanal ulanmagan</b>';
+
+    return `📣 <b>Reklama postlari bo‘limi</b>\n\n${linkedText}\n\nBu yerda kino yoki serial uchun rasm yoki video, matn va tugmalar bilan tayyor reklama posti chiqarasiz.`;
+}
+
+function getPromoMenuKeyboard(hasChannel) {
+    const buttons = [
+        [{ text: '⚙️ Asosiy promo kanalni ulash', callback_data: 'admin:promo_set_channel' }],
+        [{ text: '🎞 Promo post yaratish', callback_data: 'admin:promo_create' }],
+    ];
+
+    if (hasChannel) {
+        buttons.push([{ text: '🗑 Promo kanalni uzish', callback_data: PROMO_CHANNEL_CLEAR_CALLBACK }]);
+    }
+
+    buttons.push([{ text: '🔙 Admin panel', callback_data: 'admin:menu' }]);
+    return buttons;
+}
+
+async function showPromoMenu(ctx) {
+    const promoSettings = await getPromoChannelSettings();
+    const message = buildPromoMenuMessage(promoSettings);
+    const keyboard = getPromoMenuKeyboard(Boolean(promoSettings?.promo_channel_id));
+
+    if (ctx.updateType === 'callback_query') {
+        return ctx.editMessageText(message, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    }
+
+    return ctx.reply(message, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: keyboard }
+    });
+}
+
+async function sendPromoPreview(ctx, promoDraft, botUsername) {
+    const replyMarkup = buildPromoKeyboard(promoDraft, botUsername);
+    const caption = String(promoDraft?.caption || '').trim();
+
+    if (!promoDraft?.media?.file_id) {
+        return ctx.reply('Ko‘rsatish uchun rasm yoki video topilmadi.');
+    }
+
+    if (promoDraft.media.media_type === 'video') {
+        return ctx.replyWithVideo(promoDraft.media.file_id, {
+            caption,
+            reply_markup: replyMarkup,
+        });
+    }
+
+    return ctx.replyWithPhoto(promoDraft.media.file_id, {
+        caption,
+        reply_markup: replyMarkup,
+    });
+}
+
+async function showPromoReview(ctx, botUsername) {
+    await ctx.reply('👀 Ko‘rinishi tayyor:');
+    await sendPromoPreview(ctx, ctx.session.promoDraft, botUsername);
+
+    return ctx.reply('Postni tekshirib oling. Ma’qul bo‘lsa kanalga joylang.', {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '📣 Kanalga joylash', callback_data: PROMO_PUBLISH_CALLBACK }],
+                [
+                    { text: '✏️ Captionni o‘zgartirish', callback_data: PROMO_EDIT_CAPTION_CALLBACK },
+                    { text: '🔘 Tugmalarni o‘zgartirish', callback_data: PROMO_EDIT_BUTTONS_CALLBACK }
+                ],
+                [{ text: '❌ Bekor qilish', callback_data: PROMO_CANCEL_CALLBACK }]
+            ]
+        }
+    });
+}
+
+async function publishPromoPost(bot, promoChannel, promoDraft, botUsername) {
+    const replyMarkup = buildPromoKeyboard(promoDraft, botUsername);
+    const caption = String(promoDraft?.caption || '').trim();
+    const chatId = promoChannel?.promo_channel_id;
+
+    if (!chatId) {
+        throw new Error('Promo kanal sozlanmagan.');
+    }
+
+    if (promoDraft?.media?.media_type === 'video') {
+        return bot.telegram.sendVideo(chatId, promoDraft.media.file_id, {
+            caption,
+            reply_markup: replyMarkup,
+        });
+    }
+
+    if (promoDraft?.media?.media_type === 'photo') {
+        return bot.telegram.sendPhoto(chatId, promoDraft.media.file_id, {
+            caption,
+            reply_markup: replyMarkup,
+        });
+    }
+
+    return bot.telegram.sendMessage(chatId, caption || 'Promo post', {
+        reply_markup: replyMarkup,
+        disable_web_page_preview: true,
+    });
+}
+
+function getPromoCreatedKeyboard(code, itemType) {
+    return {
+        inline_keyboard: [
+            [{ text: '📣 Shu kontent uchun promo yaratish', callback_data: `admin:promo_from:${itemType}:${code}` }],
+            [{ text: '🔙 Admin panel', callback_data: 'admin:menu' }]
+        ]
+    };
+}
+
+async function beginPromoFlow(ctx, type, code) {
+    const promoSettings = await getPromoChannelSettings();
+
+    if (!promoSettings?.promo_channel_id) {
+        return ctx.reply('Avval reklama posti chiqadigan kanalni ulang. /admin ichidan sozlashingiz mumkin.');
+    }
+
+    const normalizedType = type === 'series' ? 'series' : 'movie';
+    const codeNumber = Number(code);
+    const item = normalizedType === 'movie'
+        ? await getMovieByCode(codeNumber)
+        : await getSeriesByCode(codeNumber);
+
+    if (!item) {
+        return ctx.reply(normalizedType === 'movie' ? 'Kino topilmadi.' : 'Serial topilmadi.');
+    }
+
+    ctx.session.newMovie = null;
+    ctx.session.newSeries = null;
+    ctx.session.editItem = null;
+    ctx.session.promoDraft = {
+        code: codeNumber,
+        itemType: normalizedType,
+        title: item.title,
+        caption: '',
+        customButtons: [],
+        media: null,
+    };
+    ctx.session.adminStep = 'promo_media';
+
+    return ctx.reply(
+        `${normalizedType === 'movie' ? '🎬' : '📺'} <b>${escapeHTML(item.title)}</b> uchun promo boshlandi.\n\nEndi promo post uchun rasm yoki qisqa video yuboring.`,
+        { parse_mode: 'HTML' }
+    );
+}
+
+function parseLabeledDetailsText(text) {
+    const normalized = String(text || '').trim();
+    if (!normalized) {
+        return null;
+    }
+
+    const lines = normalized
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+
+    if (lines.length < 3) {
+        return null;
+    }
+
+    const fields = {};
+
+    for (const line of lines) {
+        const match = line.match(/^([^:|]+)\s*[:|-]\s*(.+)$/);
+        if (!match) continue;
+
+        const rawKey = match[1].trim().toLowerCase();
+        const value = match[2].trim();
+
+        if (!value) continue;
+
+        if (['nomi', 'name', 'title'].includes(rawKey)) fields.title = value;
+        else if (['janri', 'genre'].includes(rawKey)) fields.genre = value;
+        else if (['yili', 'year'].includes(rawKey)) fields.year = value;
+        else if (['tavsifi', 'tavsif', 'desc', 'description'].includes(rawKey)) fields.desc = value;
+    }
+
+    const year = Number(fields.year);
+    if (!fields.title || !fields.genre || !fields.year || !Number.isFinite(year)) {
+        return null;
+    }
+
+    return {
+        title: fields.title,
+        genre: fields.genre,
+        year,
+        desc: fields.desc || null,
+    };
+}
+
+function parseDetailsText(text) {
+    const raw = String(text || '').trim();
+    if (!raw) {
+        return null;
+    }
+
+    const pipeParts = raw.split('|').map(part => part.trim());
+    if (pipeParts.length >= 4) {
+        const [title, genre, yearRaw, ...descParts] = pipeParts;
+        const year = Number(yearRaw);
+
+        if (title && genre && yearRaw && Number.isFinite(year)) {
+            return {
+                title,
+                genre,
+                year,
+                desc: descParts.join(' | ').trim() || null,
+            };
+        }
+    }
+
+    return parseLabeledDetailsText(raw);
+}
+
+function clearAdminDraftState(session) {
+    session.adminStep = null;
+    session.newMovie = null;
+    session.newSeries = null;
+    session.editItem = null;
+    session.promoDraft = null;
+}
+
+function getSeriesUploadKeyboard() {
+    return {
+        inline_keyboard: [
+            [{ text: '✅ Yakunlash', callback_data: SERIES_UPLOAD_FINISH_CALLBACK }],
+            [{ text: '🔙 Admin panel', callback_data: 'admin:menu' }]
+        ]
+    };
+}
+
 async function showPremiumSettingsMenu(ctx) {
     const premiumSettings = await getPremiumSettings();
     ctx.session.adminStep = null;
@@ -183,15 +681,203 @@ async function startPremiumSetup(ctx, title) {
     );
 }
 
-export function adminHandler(bot) {
+async function handleMovieMediaUpload(ctx) {
+    const media = extractTelegramMedia(ctx.message);
+    if (!media) {
+        return ctx.reply('Video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+    }
 
+    const movieDraft = ctx.session.newMovie;
+    if (!movieDraft) {
+        ctx.session.adminStep = null;
+        return ctx.reply('Saqlanayotgan kino ma’lumoti topilmadi. Jarayonni boshidan boshlang.');
+    }
+
+    await addMovie({
+        ...movieDraft,
+        ...media,
+        link: movieDraft.link ?? null,
+    });
+
+    const savedCode = movieDraft.code;
+    clearAdminDraftState(ctx.session);
+    return ctx.reply(
+        '✅ Kino saqlandi. Endi bot uni o‘zida ochib yubora oladi.',
+        { reply_markup: getPromoCreatedKeyboard(savedCode, 'movie') }
+    );
+}
+
+async function handleSeriesEpisodeUpload(ctx) {
+    const media = extractTelegramMedia(ctx.message);
+    if (!media) {
+        return ctx.reply('Qism uchun video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+    }
+
+    const seriesDraft = ctx.session.newSeries;
+    if (!seriesDraft?.code) {
+        ctx.session.adminStep = null;
+        return ctx.reply('Serial yuklash holati topilmadi. Jarayonni qaytadan boshlang.');
+    }
+
+    const nextEpisode = Number(seriesDraft.episodesCount || 0) + 1;
+    await addSeriesEpisode(seriesDraft.code, nextEpisode, media);
+    ctx.session.newSeries.episodesCount = nextEpisode;
+
+    return ctx.reply(
+        `✅ ${nextEpisode}-epizod qo‘shildi. Yana epizod yuboring yoki “Yakunlash” tugmasini bosing.`,
+        { reply_markup: getSeriesUploadKeyboard() }
+    );
+}
+
+async function handleMovieCreateFromCaptionedMedia(ctx) {
+    const media = extractTelegramMedia(ctx.message);
+    const fields = parseDetailsText(ctx.message?.caption || '');
+
+    if (!media) {
+        return ctx.reply('Video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+    }
+
+    if (!fields) {
+        return ctx.reply(`Xabar matnida kerakli ma’lumot topilmadi. Quyidagi ko‘rinishlardan birini ishlating:
+
+Nomi | Janri | Yili | Tavsifi
+
+yoki
+
+Nomi: ...
+Janri: ...
+Yili: ...
+Tavsifi: ...`);
+    }
+
+    const movieDraft = { ...(ctx.session.newMovie || {}), ...fields };
+    await addMovie({
+        ...movieDraft,
+        ...media,
+        link: null,
+    });
+
+    const savedCode = movieDraft.code;
+    clearAdminDraftState(ctx.session);
+    return ctx.reply('✅ Kino bitta xabar bilan saqlandi. Matn ham, fayl ham saqlandi.', {
+        reply_markup: getPromoCreatedKeyboard(savedCode, 'movie')
+    });
+}
+
+async function handleSeriesCreateFromCaptionedMedia(ctx) {
+    const media = extractTelegramMedia(ctx.message);
+    const fields = parseDetailsText(ctx.message?.caption || '');
+
+    if (!media) {
+        return ctx.reply('Video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+    }
+
+    if (!fields) {
+        return ctx.reply(`Xabar matnida kerakli ma’lumot topilmadi. Quyidagi ko‘rinishlardan birini ishlating:
+
+Nomi | Janri | Yili | Tavsifi
+
+yoki
+
+Nomi: ...
+Janri: ...
+Yili: ...
+Tavsifi: ...`);
+    }
+
+    const seriesDraft = { ...(ctx.session.newSeries || {}), ...fields, episodesCount: 1 };
+
+    await addSeries({
+        code: seriesDraft.code,
+        title: seriesDraft.title,
+        desc: seriesDraft.desc,
+        genre: seriesDraft.genre,
+        year: seriesDraft.year,
+    });
+    await addSeriesEpisode(seriesDraft.code, 1, media);
+
+    ctx.session.newSeries = seriesDraft;
+    ctx.session.adminStep = 'add_series_upload_episode';
+
+    return ctx.reply('✅ Serial ma’lumoti va 1-qism birga saqlandi. Endi qolgan qismlarni yuboring yoki “Yakunlash” tugmasini bosing.', {
+        reply_markup: getSeriesUploadKeyboard()
+    });
+}
+
+async function handleEditMovieMedia(ctx) {
+    const media = extractTelegramMedia(ctx.message);
+    if (!media) {
+        return ctx.reply('Video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+    }
+
+    const item = ctx.session.editItem;
+    if (!item?.code || item.type !== 'movie') {
+        ctx.session.adminStep = null;
+        ctx.session.editItem = null;
+        return ctx.reply('Tahrirlash holati topilmadi.');
+    }
+
+    const existingMovie = await getMovieByCode(item.code);
+    if (!existingMovie) {
+        clearAdminDraftState(ctx.session);
+        return ctx.reply('Kino topilmadi.');
+    }
+
+    await updateMovie(item.code, {
+        title: existingMovie.title,
+        desc: existingMovie.desc,
+        genre: existingMovie.genre,
+        year: existingMovie.year,
+        link: null,
+        ...media,
+    });
+
+    clearAdminDraftState(ctx.session);
+    return ctx.reply(`✅ Kino (Kod: ${item.code}) videosi, rasmi yoki fayli yangilandi.`);
+}
+
+async function handleEditSeriesAddEpisode(ctx) {
+    const media = extractTelegramMedia(ctx.message);
+    if (!media) {
+        return ctx.reply('Qism uchun video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+    }
+
+    const item = ctx.session.editItem;
+    if (!item?.code || item.type !== 'series') {
+        ctx.session.adminStep = null;
+        ctx.session.editItem = null;
+        return ctx.reply('Tahrirlash holati topilmadi.');
+    }
+
+    const episodes = await getSeriesEpisodes(item.code);
+    const nextEpNum = episodes.length + 1;
+    await addSeriesEpisode(item.code, nextEpNum, media);
+
+    clearAdminDraftState(ctx.session);
+    return ctx.reply(`✅ Serial (Kod: ${item.code}) ga ${nextEpNum}-epizod muvaffaqiyatli qo‘shildi.`);
+}
+
+export function adminHandler(bot) {
     adminCommandsHandler(bot);
+
+    bot.command('cancel', (ctx) => {
+        const uid = Number(ctx.from?.id);
+        if (!isAdmin(uid)) return;
+        if (!ctx.session) ctx.session = {};
+
+        clearAdminDraftState(ctx.session);
+        ctx.session.premiumDraft = null;
+        ctx.session.newChannel = null;
+        ctx.session.promoDraft = null;
+
+        return ctx.reply('⛔ Amal bekor qilindi. /admin orqali qayta boshlashingiz mumkin.');
+    });
 
     bot.command('admin', (ctx) => {
         const uid = Number(ctx.from?.id);
         if (!isAdmin(uid)) return ctx.reply('Siz admin emassiz.');
         return ctx.reply(
-            'Admin panelga xush kelibsiz 👑',
+            'Admin bo‘limiga xush kelibsiz 👑',
             {
                 reply_markup: {
                     inline_keyboard: getAdminPanelKeyboard()
@@ -208,13 +894,10 @@ export function adminHandler(bot) {
         const step = ctx.session.adminStep;
 
         if (step === 'broadcast_message' && ctx.message) {
-
             ctx.session.adminStep = null;
 
-            const waitMessage = await ctx.reply('⏳ Xabar tahlil qilinyapti va yuborish boshlandi...');
-
+            const waitMessage = await ctx.reply('⏳ Xabar yuborishga tayyorlanmoqda...');
             const results = await sendBroadcastAdvanced(bot, ctx.message);
-
             await ctx.telegram.deleteMessage(waitMessage.chat.id, waitMessage.message_id).catch(() => {});
 
             return ctx.reply(`
@@ -223,6 +906,71 @@ export function adminHandler(bot) {
 🟢 Yuborildi: ${results.sent}
 🔴 Xatolik (bloklaganlar): ${results.failed}
             `);
+        }
+
+        return next();
+    });
+
+    bot.on('message', async (ctx, next) => {
+        const uid = Number(ctx.from?.id);
+        if (!isAdmin(uid)) { return next(); }
+
+        if (!ctx.session) ctx.session = {};
+        const step = ctx.session.adminStep;
+
+        if (!step) {
+            return next();
+        }
+
+        if (step === 'add_movie_metadata' && extractTelegramMedia(ctx.message)) {
+            return handleMovieCreateFromCaptionedMedia(ctx);
+        }
+
+        if (step === 'add_movie_media') {
+            return handleMovieMediaUpload(ctx);
+        }
+
+        if (step === 'add_series_metadata' && extractTelegramMedia(ctx.message)) {
+            return handleSeriesCreateFromCaptionedMedia(ctx);
+        }
+
+        if (step === 'add_series_upload_episode') {
+            return handleSeriesEpisodeUpload(ctx);
+        }
+
+        if (step === 'edit_movie_media') {
+            return handleEditMovieMedia(ctx);
+        }
+
+        if (step === 'edit_series_add_ep') {
+            return handleEditSeriesAddEpisode(ctx);
+        }
+
+        if (step === 'promo_media') {
+            const promoMedia = extractPromoMedia(ctx.message);
+
+            if (!promoMedia) {
+                return ctx.reply('Reklama posti uchun rasm yoki qisqa video yuboring. Tayyor kanal postini ham uzatib yuborishingiz mumkin.');
+            }
+
+            const forwardedCaption = String(ctx.message?.caption || '').trim();
+            const shouldUseForwardedCaption = forwardedCaption.length > 0 && forwardedCaption.length <= 1024;
+
+            ctx.session.promoDraft = {
+                ...(ctx.session.promoDraft || {}),
+                media: promoMedia,
+                caption: shouldUseForwardedCaption ? forwardedCaption : String(ctx.session.promoDraft?.caption || ''),
+            };
+
+            if (shouldUseForwardedCaption) {
+                ctx.session.adminStep = 'promo_buttons_mode';
+                await ctx.reply(`✅ Rasm yoki video qabul qilindi.
+🪄 Uzatib yuborilgan postdagi matn ham avtomatik olindi.`);
+                return promptPromoButtonsMode(ctx);
+            }
+
+            ctx.session.adminStep = 'promo_caption';
+            return ctx.reply('Endi post matnini yuboring. Xohlasangiz tayyor kanal postingizni uzatib yuborsangiz, matn o‘zi olinadi.');
         }
 
         return next();
@@ -248,36 +996,149 @@ export function adminHandler(bot) {
             if (adminAction === 'menu') {
                 ctx.session.adminStep = null;
                 ctx.session.premiumDraft = null;
-                return ctx.editMessageText('Admin panelga xush kelibsiz 👑', {
+                ctx.session.newMovie = null;
+                ctx.session.newSeries = null;
+                ctx.session.editItem = null;
+                ctx.session.promoDraft = null;
+                return ctx.editMessageText('Admin bo‘limiga xush kelibsiz 👑', {
                     reply_markup: {
                         inline_keyboard: getAdminPanelKeyboard()
                     }
                 });
             } else if (adminAction === 'add_movie') {
                 ctx.session.adminStep = 'add_movie_code';
+                ctx.session.newMovie = null;
+                ctx.session.newSeries = null;
+                ctx.session.editItem = null;
+                ctx.session.promoDraft = null;
                 return ctx.editMessageText('Kino kodini kiriting (Masalan: 1001):');
             } else if (adminAction === 'add_series') {
                 ctx.session.adminStep = 'add_series_code';
+                ctx.session.newSeries = null;
+                ctx.session.newMovie = null;
+                ctx.session.editItem = null;
+                ctx.session.promoDraft = null;
                 return ctx.editMessageText('Serial kodini kiriting (Masalan: 2001):');
             } else if (adminAction === 'edit_item') {
                 ctx.session.adminStep = 'edit_item_code';
+                ctx.session.promoDraft = null;
                 return ctx.editMessageText('Tahrirlamoqchi bo‘lgan kino yoki serial kodini kiriting:');
+            } else if (adminAction === 'promo_menu') {
+                ctx.session.adminStep = null;
+                ctx.session.promoDraft = null;
+                return showPromoMenu(ctx);
+            } else if (adminAction === 'promo_set_channel') {
+                ctx.session.adminStep = 'promo_channel_id';
+                ctx.session.promoDraft = null;
+                return ctx.editMessageText('Reklama posti chiqadigan kanalni yuboring. @username yoki ID bo‘lishi mumkin. Bot o‘sha kanalda admin bo‘lishi kerak.');
+            } else if (adminAction === 'promo_create') {
+                ctx.session.adminStep = 'promo_item_code';
+                ctx.session.promoDraft = null;
+                return ctx.editMessageText('Reklama qilinadigan kino yoki serial kodini yuboring. So‘ng tayyor kanal postini uzatib yuborsangiz, rasm/video va matn o‘zi olinadi:');
+            } else if (adminAction === 'promo_from') {
+                const [itemType, code] = [params[1], params[2]];
+                return beginPromoFlow(ctx, itemType, code);
+            } else if (adminAction === 'promo_publish') {
+                const promoDraft = ctx.session.promoDraft;
+                if (!promoDraft?.code || !promoDraft?.media?.file_id) {
+                    return ctx.editMessageText('Tayyorlanayotgan post topilmadi yoki hali bitmagan.');
+                }
+
+                const promoChannel = await getPromoChannelSettings();
+                const botUsername = ctx.botInfo?.username || bot.botInfo?.username;
+
+                try {
+                    const sentMessage = await publishPromoPost(bot, promoChannel, promoDraft, botUsername);
+                    const publicLink = promoChannel.promo_channel_username
+                        ? `https://t.me/${promoChannel.promo_channel_username}/${sentMessage.message_id}`
+                        : null;
+
+                    ctx.session.adminStep = null;
+                    ctx.session.promoDraft = null;
+
+                    return ctx.editMessageText(
+                        publicLink
+                            ? `✅ Promo post kanalga joylandi.\n\n🔗 ${publicLink}`
+                            : '✅ Promo post kanalga muvaffaqiyatli joylandi.'
+                    );
+                } catch (error) {
+                    console.error('Promo postni kanalga joylashda xato:', error);
+                    return ctx.editMessageText(`⚠️ Promo postni joylashda xatolik yuz berdi:\n${error.message}`);
+                }
+            } else if (adminAction === 'promo_edit_caption') {
+                if (!ctx.session.promoDraft?.code) {
+                    return ctx.editMessageText('Tayyorlanayotgan post topilmadi.');
+                }
+                ctx.session.adminStep = 'promo_caption';
+                return ctx.editMessageText('Yangi post matnini yuboring:');
+            } else if (adminAction === 'promo_edit_buttons') {
+                if (!ctx.session.promoDraft?.code) {
+                    return ctx.editMessageText('Tayyorlanayotgan post topilmadi.');
+                }
+                ctx.session.adminStep = 'promo_buttons_mode';
+                return promptPromoButtonsMode(ctx);
+            } else if (adminAction === 'promo_btnmode') {
+                if (!ctx.session.promoDraft?.code) {
+                    return ctx.editMessageText('Tayyorlanayotgan post topilmadi.');
+                }
+
+                const mode = params[1];
+                const promoChannel = await getPromoChannelSettings();
+
+                try {
+                    if (mode === 'custom') {
+                        ctx.session.adminStep = 'promo_buttons';
+                        return ctx.editMessageText(getPromoButtonsStepText());
+                    }
+
+                    if (mode === 'trailer' || mode === 'channel_trailer') {
+                        ctx.session.adminStep = 'promo_trailer_url';
+                        ctx.session.promoDraft = {
+                            ...(ctx.session.promoDraft || {}),
+                            buttonPreset: mode,
+                        };
+                        return ctx.editMessageText('Treyler havolasini yuboring. Xohlasangiz Tugma nomi - havola ko‘rinishida ham yozishingiz mumkin.');
+                    }
+
+                    const customButtons = buildQuickPromoButtons(mode, promoChannel);
+                    ctx.session.promoDraft = {
+                        ...(ctx.session.promoDraft || {}),
+                        customButtons,
+                        buttonPreset: null,
+                    };
+                    ctx.session.adminStep = null;
+
+                    await ctx.editMessageText('✅ Promo tugma varianti tanlandi.');
+                    const botUsername = ctx.botInfo?.username || bot.botInfo?.username;
+                    return showPromoReview(ctx, botUsername);
+                } catch (error) {
+                    return ctx.editMessageText(`⚠️ Tugmalarni tayyorlashda muammo bo‘ldi: ${error.message}`);
+                }
+            } else if (adminAction === 'promo_cancel') {
+                ctx.session.adminStep = null;
+                ctx.session.promoDraft = null;
+                return showPromoMenu(ctx);
+            } else if (adminAction === 'promo_clear_channel') {
+                await clearPromoChannelSettings();
+                ctx.session.adminStep = null;
+                ctx.session.promoDraft = null;
+                return showPromoMenu(ctx);
             } else if (adminAction === 'show_stats') {
-                const { message, buttons } = await getStatsMenuData();
-                return ctx.editMessageText(message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+                const menuData = await getStatsMenuData();
+                return ctx.editMessageText(menuData.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: menuData.buttons } });
             } else if (adminAction === 'list') {
                 const [type, page] = [params[1], Number(params[2])];
-                const data = await createListMenuData(type, page);
-                if (!data) return ctx.editMessageText('Noto‘g‘ri tur.');
-                return ctx.editMessageText(data.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: data.buttons } });
+                const listData = await createListMenuData(type, page);
+                if (!listData) return ctx.editMessageText('Noto‘g‘ri tur.');
+                return ctx.editMessageText(listData.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: listData.buttons } });
             } else if (adminAction === 'listpage') {
                 const [type, page] = [params[1], Number(params[2])];
-                const data = await createListMenuData(type, page);
-                if (!data) return ctx.editMessageText('Noto‘g‘ri tur.');
-                return ctx.editMessageText(data.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: data.buttons } });
+                const listData = await createListMenuData(type, page);
+                if (!listData) return ctx.editMessageText('Noto‘g‘ri tur.');
+                return ctx.editMessageText(listData.message, { parse_mode: 'HTML', reply_markup: { inline_keyboard: listData.buttons } });
             } else if (adminAction === 'broadcast') {
                 ctx.session.adminStep = 'broadcast_message';
-                return ctx.editMessageText('Foydalanuvchilarga yubormoqchi bo‘lgan xabaringizni yuboring (text/photo/video/doc):');
+                return ctx.editMessageText('Hammaga yubormoqchi bo‘lgan xabaringizni yuboring. Matn, rasm, video yoki fayl bo‘lishi mumkin:');
             } else if (adminAction === 'channels') {
                 const channels = await getChannels();
                 let msg = '📢 Majburiy kanallar ro‘yxati:\n\n';
@@ -294,6 +1155,27 @@ export function adminHandler(bot) {
             } else if (adminAction === 'premium_disable') {
                 await setPremiumSettings({ enabled: false });
                 return showPremiumSettingsMenu(ctx);
+            } else if (adminAction === 'finish_series_upload') {
+                const seriesDraft = ctx.session.newSeries;
+                if (!seriesDraft?.code) {
+                    ctx.session.adminStep = null;
+                    return ctx.editMessageText('Davom etayotgan serial saqlash jarayoni topilmadi.');
+                }
+
+                if (!seriesDraft.episodesCount) {
+                    await deleteSeries(seriesDraft.code);
+                    ctx.session.adminStep = null;
+                    ctx.session.newSeries = null;
+                    return ctx.editMessageText('⚠️ Hech qaysi qism yuborilmagani uchun serial saqlanmadi.');
+                }
+
+                const savedCount = seriesDraft.episodesCount;
+                const savedCode = seriesDraft.code;
+                ctx.session.adminStep = null;
+                ctx.session.newSeries = null;
+                return ctx.editMessageText(`✅ Serial saqlandi. Jami qismlar: ${savedCount}`, {
+                    reply_markup: getPromoCreatedKeyboard(savedCode, 'series')
+                });
             }
         }
 
@@ -316,10 +1198,8 @@ export function adminHandler(bot) {
             let result;
 
             if (type === 'movie') {
-                // deleteMovie() chaqiruvi oldiga AWAIТ qo'shildi
                 result = await deleteMovie(codeNum);
             } else if (type === 'series') {
-                // deleteSeries() chaqiruvi oldiga AWAIТ qo'shildi
                 result = await deleteSeries(codeNum);
             }
 
@@ -338,12 +1218,12 @@ export function adminHandler(bot) {
             if (editType === 'details') {
                 ctx.session.adminStep = 'edit_details';
                 return ctx.editMessageText('Iltimos, Nomi | Janri | Yili | Tavsifi formatida ma’lumotlarni kiriting:');
-            } else if (editType === 'link' && type === 'movie') {
-                ctx.session.adminStep = 'edit_movie_link';
-                return ctx.editMessageText('Yangi kino linkini yuboring:');
+            } else if (editType === 'media' && type === 'movie') {
+                ctx.session.adminStep = 'edit_movie_media';
+                return ctx.editMessageText('Yangi kino videosi, rasmi yoki faylini yuboring. Kanal postini ham uzatib yuborishingiz mumkin:');
             } else if (editType === 'add_ep' && type === 'series') {
                 ctx.session.adminStep = 'edit_series_add_ep';
-                return ctx.editMessageText('Yangi epizod linkini yuboring:');
+                return ctx.editMessageText('Yangi qism videosi, rasmi yoki faylini yuboring. Kanal postini ham uzatib yuborishingiz mumkin:');
             } else if (editType === 'del_ep' && type === 'series') {
                 ctx.session.adminStep = 'edit_series_del_ep';
                 return ctx.editMessageText('O‘chirmoqchi bo‘lgan epizod raqamini kiriting (Masalan: 5):');
@@ -367,45 +1247,36 @@ export function adminHandler(bot) {
         if (!step) { return next(); }
 
         if (step === 'premium_price') {
-            if (!text) return ctx.reply('Kanalga qo‘shilish narxini kiriting.');
-
             ctx.session.premiumDraft = {
                 ...(ctx.session.premiumDraft || {}),
                 price: text
             };
             ctx.session.adminStep = 'premium_card_number';
-
-            return ctx.reply('Karta raqamini kiriting:');
+            return ctx.reply('Karta raqamini yuboring:');
         }
 
         if (step === 'premium_card_number') {
-            if (!text) return ctx.reply('Karta raqamini kiriting.');
-
             ctx.session.premiumDraft = {
                 ...(ctx.session.premiumDraft || {}),
                 card_number: text
             };
             ctx.session.adminStep = 'premium_card_owner';
-
             return ctx.reply('Karta egasi ismini kiriting:');
         }
 
         if (step === 'premium_card_owner') {
-            if (!text) return ctx.reply('Karta egasi ismini kiriting.');
-
             ctx.session.premiumDraft = {
                 ...(ctx.session.premiumDraft || {}),
                 card_owner: text
             };
             ctx.session.adminStep = 'premium_admin_username';
-
-            return ctx.reply('Admin username kiriting (Masalan: kinobot_admin yoki @kinobot_admin):');
+            return ctx.reply('Admin username yuboring. Masalan: kinobot_admin yoki @kinobot_admin');
         }
 
         if (step === 'premium_admin_username') {
             const normalizedUsername = text.replace(/^@+/, '').trim();
             if (!normalizedUsername) {
-                return ctx.reply('Admin username noto‘g‘ri. Iltimos, qaytadan kiriting.');
+                return ctx.reply('Admin username noto‘g‘ri. Qaytadan yuboring.');
             }
 
             ctx.session.premiumDraft = {
@@ -431,6 +1302,116 @@ export function adminHandler(bot) {
             );
         }
 
+        if (step === 'promo_channel_id') {
+            const normalizedChannel = normalizeChannelTarget(text);
+            if (!normalizedChannel) {
+                return ctx.reply('Kanal noto‘g‘ri yozilgan. @username, t.me/link yoki raqamli ID yuboring.');
+            }
+
+            try {
+                const chat = await ctx.telegram.getChat(normalizedChannel);
+
+                if (chat?.type !== 'channel') {
+                    return ctx.reply('Bu kanal emas. Kanalning @username yoki ID sini yuboring.');
+                }
+
+                const botInfo = ctx.botInfo || bot.botInfo || await ctx.telegram.getMe();
+                let botMember = null;
+
+                try {
+                    botMember = await ctx.telegram.getChatMember(chat.id, botInfo.id);
+                } catch (memberError) {
+                    console.error('Promo kanalida bot holatini tekshirishda xato:', memberError.message);
+                }
+
+                if (botMember && !['administrator', 'creator'].includes(botMember.status)) {
+                    return ctx.reply('Bot bu kanalda admin emas. Avval botga ruxsat bering.');
+                }
+
+                await setPromoChannelSettings({
+                    promo_channel_id: String(chat.id),
+                    promo_channel_title: chat.title || normalizedChannel,
+                    promo_channel_username: chat.username || null,
+                    promo_channel_link: chat.username ? `https://t.me/${chat.username}` : null,
+                });
+
+                ctx.session.adminStep = null;
+                return ctx.reply(
+                    `✅ Promo kanal saqlandi.\n\n📢 Kanal: ${chat.title || 'Noma’lum'}\n🆔 ${chat.id}${chat.username ? `\n🔗 https://t.me/${chat.username}` : ''}`
+                );
+            } catch (error) {
+                console.error('Promo kanalni ulashda xato:', error);
+                return ctx.reply('Kanalni tekshirib bo‘lmadi. Bot kanalga qo‘shilganini va ruxsat berilganini tekshirib, qayta yuboring.');
+            }
+        }
+
+        if (step === 'promo_item_code') {
+            if (!/^\d+$/.test(text)) {
+                return ctx.reply('Promo uchun raqamli kino yoki serial kodini yuboring.');
+            }
+
+            const codeNum = Number(text);
+            const movie = await getMovieByCode(codeNum);
+            const series = !movie ? await getSeriesByCode(codeNum) : null;
+
+            if (!movie && !series) {
+                return ctx.reply('Bu kod bo‘yicha kino yoki serial topilmadi.');
+            }
+
+            return beginPromoFlow(ctx, movie ? 'movie' : 'series', codeNum);
+        }
+
+        if (step === 'promo_caption') {
+            if (text.length > 1024) {
+                return ctx.reply('Matn juda uzun. 1024 belgidan oshirmang.');
+            }
+
+            ctx.session.promoDraft = {
+                ...(ctx.session.promoDraft || {}),
+                caption: text,
+            };
+            ctx.session.adminStep = 'promo_buttons_mode';
+
+            return promptPromoButtonsMode(ctx);
+        }
+
+        if (step === 'promo_trailer_url') {
+            try {
+                const promoChannel = await getPromoChannelSettings();
+                const buttonPreset = ctx.session.promoDraft?.buttonPreset;
+                const customButtons = buildQuickPromoButtons(buttonPreset, promoChannel, text);
+
+                ctx.session.promoDraft = {
+                    ...(ctx.session.promoDraft || {}),
+                    customButtons,
+                    buttonPreset: null,
+                };
+                ctx.session.adminStep = null;
+
+                const botUsername = ctx.botInfo?.username || bot.botInfo?.username;
+                return showPromoReview(ctx, botUsername);
+            } catch (error) {
+                return ctx.reply(`⚠️ Treyler tugmasini tayyorlashda muammo bo‘ldi: ${error.message}`);
+            }
+        }
+
+        if (step === 'promo_buttons') {
+            try {
+                const customButtons = parsePromoButtons(text);
+                ctx.session.promoDraft = {
+                    ...(ctx.session.promoDraft || {}),
+                    customButtons,
+                    buttonPreset: null,
+                };
+                ctx.session.adminStep = null;
+
+                const botUsername = ctx.botInfo?.username || bot.botInfo?.username;
+                return showPromoReview(ctx, botUsername);
+            } catch (error) {
+                return ctx.reply(`⚠️ Tugmalarni o‘qishda muammo bo‘ldi: ${error.message}`);
+            }
+        }
+
         if (step === 'edit_item_code') {
             if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat raqamli kod kiriting.');
             const codeNum = Number(text);
@@ -443,7 +1424,7 @@ export function adminHandler(bot) {
             } else if (series) {
                 await sendEditDeleteMenu(ctx, codeNum, 'series');
             } else {
-                return ctx.reply('Bu kodga tegishli Kino yoki Serial bazada topilmadi.');
+                return ctx.reply('Bu kod bo‘yicha kino yoki serial topilmadi.');
             }
             ctx.session.adminStep = null;
             return;
@@ -451,58 +1432,40 @@ export function adminHandler(bot) {
 
         const item = ctx.session.editItem;
         if (item) {
-
             if (step === 'edit_details') {
-                const parts = text.split('|').map(p => p.trim());
-                if (parts.length < 4) return ctx.reply('Iltimos, ma’lumotlarni Nomi | Janri | Yili | Tavsifi formatida kiriting.');
+                const fields = parseDetailsText(text);
+                if (!fields) return ctx.reply(`Iltimos, ma’lumotlarni quyidagi formatlardan biri bilan kiriting:
 
-                const [title, genre, year, desc] = parts;
+Nomi | Janri | Yili | Tavsifi
 
-                const fields = { title, genre, year: Number(year), desc };
+yoki
+
+Nomi: ...
+Janri: ...
+Yili: ...
+Tavsifi: ...`);
 
                 if (item.type === 'movie') {
                     const existingMovie = await getMovieByCode(item.code);
                     if (!existingMovie) return ctx.reply('Kino topilmadi.');
 
-                    await updateMovie(item.code, { ...fields, link: existingMovie.link });
+                    await updateMovie(item.code, {
+                        ...fields,
+                        link: existingMovie.link,
+                        media_type: existingMovie.media_type,
+                        file_id: existingMovie.file_id,
+                        file_unique_id: existingMovie.file_unique_id,
+                        file_name: existingMovie.file_name,
+                        mime_type: existingMovie.mime_type,
+                        file_size: existingMovie.file_size,
+                        duration: existingMovie.duration,
+                    });
                 } else if (item.type === 'series') {
-
                     await updateSeries(item.code, fields);
                 }
 
-                ctx.session.adminStep = null;
-                ctx.session.editItem = null;
+                clearAdminDraftState(ctx.session);
                 return ctx.reply(`✅ ${item.type === 'movie' ? 'Kino' : 'Serial'} (Kod: ${item.code}) ma’lumotlari muvaffaqiyatli tahrirlandi.`);
-            }
-
-
-            if (step === 'edit_movie_link' && item.type === 'movie') {
-
-                const existingMovie = await getMovieByCode(item.code);
-                if (!existingMovie) return ctx.reply('Kino topilmadi.');
-
-                await updateMovie(item.code, {
-                    title: existingMovie.title,
-                    desc: existingMovie.desc,
-                    genre: existingMovie.genre,
-                    year: existingMovie.year,
-                    link: text
-                });
-
-                ctx.session.adminStep = null;
-                ctx.session.editItem = null;
-                return ctx.reply(`✅ Kino (Kod: ${item.code}) linki muvaffaqiyatli tahrirlandi.`);
-            }
-
-            if (step === 'edit_series_add_ep' && item.type === 'series') {
-                const episodes = await getSeriesEpisodes(item.code);
-                const nextEpNum = episodes ? episodes.length + 1 : 1;
-
-                await addSeriesEpisode(item.code, nextEpNum, text);
-
-                ctx.session.adminStep = null;
-                ctx.session.editItem = null;
-                return ctx.reply(`✅ Serial (Kod: ${item.code}) ga ${nextEpNum}-epizod muvaffaqiyatli qo‘shildi.`);
             }
 
             if (step === 'edit_series_del_ep' && item.type === 'series') {
@@ -510,16 +1473,37 @@ export function adminHandler(bot) {
                 if (!/^\d+$/.test(text) || episodeNum <= 0) return ctx.reply('Iltimos, musbat butun epizod raqamini kiriting.');
 
                 const result = await deleteSeriesEpisode(item.code, episodeNum);
-
-                ctx.session.adminStep = null;
-                ctx.session.editItem = null;
+                clearAdminDraftState(ctx.session);
 
                 if (result?.deletedCount > 0) {
                     return ctx.reply(`✅ Serial (Kod: ${item.code}) dan ${episodeNum}-epizod muvaffaqiyatli o‘chirildi.`);
-                } else {
-                    return ctx.reply(`⚠️ Serial (Kod: ${item.code}) da ${episodeNum}-epizod topilmadi yoki o‘chirilmadi.`);
                 }
+                return ctx.reply(`⚠️ Serial (Kod: ${item.code}) da ${episodeNum}-epizod topilmadi yoki o‘chirilmadi.`);
             }
+        }
+
+        if (step === 'add_movie_media') {
+            return ctx.reply('Bu yerga matn emas, video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+        }
+
+        if (step === 'add_series_upload_episode') {
+            return ctx.reply('Qism uchun video, rasm yoki fayl yuboring yoki “Yakunlash” tugmasini bosing.');
+        }
+
+        if (step === 'edit_movie_media') {
+            return ctx.reply('Kino uchun yangi video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+        }
+
+        if (step === 'edit_series_add_ep') {
+            return ctx.reply('Yangi qism uchun video, rasm yoki fayl yuboring. Kanal postini ham uzatib yuborishingiz mumkin.');
+        }
+
+        if (step === 'promo_media') {
+            return ctx.reply('Bu yerga matn emas, rasm yoki qisqa video yuboring. Tayyor kanal postini ham uzatib yuborishingiz mumkin.');
+        }
+
+        if (step === 'promo_buttons_mode') {
+            return ctx.reply('Tugmalar ko‘rinishini pastdagi tugmalardan tanlang.');
         }
 
         if (step.startsWith('add_movie') || step.startsWith('add_series') || step.startsWith('add_channel_')) {
@@ -527,107 +1511,73 @@ export function adminHandler(bot) {
                 case 'add_movie_code':
                     if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat raqam kiriting.');
                     if (await getMovieByCode(Number(text))) return ctx.reply('Bu kod oldin olingan. Boshqasini kiriting.');
+                    if (await getSeriesByCode(Number(text))) return ctx.reply('Bu kod serial uchun ishlatilgan. Boshqa kod kiriting.');
                     ctx.session.newMovie = { code: Number(text) };
-                    ctx.session.adminStep = 'add_movie_title';
-                    return ctx.reply('Kino nomini kiriting:');
+                    ctx.session.adminStep = 'add_movie_metadata';
+                    return ctx.reply('Kino ma’lumotlarini yuboring:\nNomi | Janri | Yili | Tavsifi\n\nYoki video, rasm yoki fayl yuborib, shu matnni xabar ichiga yozing.');
 
-                case 'add_movie_title':
-                    ctx.session.newMovie.title = text;
-                    ctx.session.adminStep = 'add_movie_genre';
-                    return ctx.reply('Kino janrini kiriting (Masalan: Fantastika, Jangari):');
+                case 'add_movie_metadata': {
+                    const movieFields = parseDetailsText(text);
+                    if (!movieFields) return ctx.reply(`Formatlardan biri bilan yuboring:
 
-                case 'add_movie_genre':
-                    ctx.session.newMovie.genre = text;
-                    ctx.session.adminStep = 'add_movie_year';
-                    return ctx.reply('Kino yilini kiriting (Masalan: 2023):');
+Nomi | Janri | Yili | Tavsifi
 
-                case 'add_movie_year':
-                    if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat yilni kiriting.');
-                    ctx.session.newMovie.year = Number(text);
-                    ctx.session.adminStep = 'add_movie_desc';
-                    return ctx.reply('Kino tavsifini kiriting:');
+yoki
 
-                case 'add_movie_desc':
-                    ctx.session.newMovie.desc = text;
-                    ctx.session.adminStep = 'add_movie_link';
-                    return ctx.reply('Kino linkini yuboring (Masalan: https://t.me/filmler/1234):');
-
-                case 'add_movie_link':
-                    ctx.session.newMovie.link = text;
-                    await addMovie(ctx.session.newMovie);
-                    ctx.session.adminStep = null;
-                    ctx.session.newMovie = null;
-                    return ctx.reply('Kino muvaffaqiyatli qo‘shildi! 🎉');
+Nomi: ...
+Janri: ...
+Yili: ...
+Tavsifi: ...`);
+                    ctx.session.newMovie = { ...ctx.session.newMovie, ...movieFields };
+                    ctx.session.adminStep = 'add_movie_media';
+                    return ctx.reply('Endi kino videosi, rasmi yoki faylini yuboring. Xohlasangiz kanal postini ham uzatib yuborishingiz mumkin. Bot uni o‘zida saqlab oladi.');
+                }
 
                 case 'add_series_code':
                     if (!/^\d+$/.test(text)) return ctx.reply('Faqat raqam kiriting.');
                     if (await getSeriesByCode(Number(text))) return ctx.reply('Bu kod oldin band qilingan.');
-                    ctx.session.newSeries = { code: Number(text), episodes: [] };
-                    ctx.session.adminStep = 'add_series_title';
-                    return ctx.reply('Serial nomini kiriting:');
+                    if (await getMovieByCode(Number(text))) return ctx.reply('Bu kod kino uchun ishlatilgan. Boshqa kod kiriting.');
+                    ctx.session.newSeries = { code: Number(text), episodesCount: 0 };
+                    ctx.session.adminStep = 'add_series_metadata';
+                    return ctx.reply('Serial ma’lumotlarini yuboring:\nNomi | Janri | Yili | Tavsifi\n\nYoki birinchi qismni yuborib, shu matnni xabar ichiga yozing.');
 
-                case 'add_series_title':
-                    ctx.session.newSeries.title = text;
-                    ctx.session.adminStep = 'add_series_genre';
-                    return ctx.reply('Serial janrini kiriting:');
+                case 'add_series_metadata': {
+                    const seriesFields = parseDetailsText(text);
+                    if (!seriesFields) return ctx.reply(`Formatlardan biri bilan yuboring:
 
-                case 'add_series_genre':
-                    ctx.session.newSeries.genre = text;
-                    ctx.session.adminStep = 'add_series_year';
-                    return ctx.reply('Serial yilini kiriting:');
+Nomi | Janri | Yili | Tavsifi
 
-                case 'add_series_year':
-                    if (!/^\d+$/.test(text)) return ctx.reply('Iltimos faqat yilni kiriting.');
-                    ctx.session.newSeries.year = Number(text);
-                    ctx.session.adminStep = 'add_series_desc';
-                    return ctx.reply('Serial tavsifini kiriting:');
+yoki
 
-                case 'add_series_desc':
-                    ctx.session.newSeries.desc = text;
-                    ctx.session.adminStep = 'add_series_episode';
-                    return ctx.reply('Serialning 1-qism linkini yuboring:');
+Nomi: ...
+Janri: ...
+Yili: ...
+Tavsifi: ...`);
 
-                case 'add_series_episode':
-                    ctx.session.newSeries.episodes.push(text);
-                    ctx.session.adminStep = 'add_series_more';
-                    return ctx.reply('Yana epizod qo‘shishni xohlaysizmi? (Ha/Yo‘q)');
+                    ctx.session.newSeries = { ...ctx.session.newSeries, ...seriesFields, episodesCount: 0 };
+                    await addSeries({
+                        code: ctx.session.newSeries.code,
+                        title: ctx.session.newSeries.title,
+                        desc: ctx.session.newSeries.desc,
+                        genre: ctx.session.newSeries.genre,
+                        year: ctx.session.newSeries.year
+                    });
+                    ctx.session.adminStep = 'add_series_upload_episode';
+                    return ctx.reply(
+                        'Endi serial qismlarini bittalab yuboring yoki kanal postlarini uzatib yuboring. Bot ularni o‘zida saqlab boradi. Tugaganda “Yakunlash” tugmasini bosing.',
+                        { reply_markup: getSeriesUploadKeyboard() }
+                    );
+                }
 
-                case 'add_series_more':
-                    if (text.toLowerCase() === 'ha' || text.toLowerCase() === 'xa') {
-                        ctx.session.adminStep = 'add_series_episode';
-                        return ctx.reply('Keyingi qism linkini yuboring:');
-                    } else {
-                        if (ctx.session.newSeries.episodes.length === 0) {
-                            ctx.session.adminStep = null;
-                            ctx.session.newSeries = null;
-                            return ctx.reply('Serial epizodlari qo‘shilmaganligi sababli serial qo‘shilmadi. Jarayon bekor qilindi.');
-                        }
-
-                        await addSeries({
-                            code: ctx.session.newSeries.code,
-                            title: ctx.session.newSeries.title,
-                            desc: ctx.session.newSeries.desc,
-                            genre: ctx.session.newSeries.genre,
-                            year: ctx.session.newSeries.year
-                        });
-
-                        for (const [index, link] of ctx.session.newSeries.episodes.entries()) {
-                            await addSeriesEpisode(ctx.session.newSeries.code, index + 1, link);
-                        }
-
-                        ctx.session.adminStep = null;
-                        ctx.session.newSeries = null;
-                        return ctx.reply('Serial muvaffaqiyatli qo‘shildi! 🎉');
-                    }
-
-                case 'add_channel_id':
+                case 'add_channel_id': {
                     const channelId = text.startsWith('@') ? text : Number(text);
                     if (!channelId || (typeof channelId === 'string' && channelId.length < 2)) {
-                        return ctx.reply('Noto‘g‘ri kanal username/ID sini kiritdingiz.');
+                        return ctx.reply('Kanal noto‘g‘ri yozilgan.');
                     }
                     ctx.session.newChannel = { channel_id: channelId };
                     ctx.session.adminStep = 'add_channel_name';
                     return ctx.reply('Kanal nomi (Masalan: Rasmiy Kino Kanal) kiriting:');
+                }
 
                 case 'add_channel_name':
                     ctx.session.newChannel.name = text;
@@ -641,8 +1591,7 @@ export function adminHandler(bot) {
 
                     ctx.session.adminStep = null;
                     ctx.session.newChannel = null;
-                    // ✅ RETURN qo'shildi
-                    return ctx.reply(`✅ Kanal muvaffaqiyatli qo‘shildi!`);
+                    return ctx.reply('✅ Kanal saqlandi!');
             }
         }
 

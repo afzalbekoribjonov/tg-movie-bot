@@ -1,6 +1,7 @@
 import { getMovieByCode, getSeriesByCode, getSeriesEpisodes } from '../database.js';
 import { sendMedia, escapeHTML } from '../utils.js';
 import { createSerialButtons } from './serial_buttons.js';
+import { appendKeyboardRow, getShareButtonRow } from './share.js';
 
 export async function handleNumericCodeLookup(ctx, rawCode) {
     const text = String(rawCode || '').trim();
@@ -27,7 +28,10 @@ export async function handleNumericCodeLookup(ctx, rawCode) {
                 return true;
             }
 
-            const buttons = createSerialButtons(code, episodes, 0);
+            const buttons = appendKeyboardRow(
+                createSerialButtons(code, episodes, 0),
+                getShareButtonRow('series', code)
+            );
             const message = `
 📺 <b>${title}</b> (${year})
 
@@ -46,7 +50,7 @@ export async function handleNumericCodeLookup(ctx, rawCode) {
             return true;
         }
 
-        await ctx.reply(escapeHTML('Afsuski bunday kod mavjud emas!'), { parse_mode: 'HTML' });
+        await ctx.reply(escapeHTML('Bunday kod topilmadi.'), { parse_mode: 'HTML' });
         return false;
     } catch (error) {
         console.error(`Foydalanuvchi kodi ${text} ni qayta ishlashda xato:`, error);

@@ -16,8 +16,7 @@ if (!config.BOT_TOKEN) {
 }
 
 if (!config.MONGODB_URI) {
-    console.error("XATO: MONGODB_URI topilmadi.");
-    process.exit(1);
+    console.warn("OGOHLANTIRISH: MONGODB_URI topilmadi. Bot vaqtincha kutish xabari bilan ishga tushadi.");
 }
 
 export default config;

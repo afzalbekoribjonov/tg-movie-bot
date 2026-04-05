@@ -1,4 +1,6 @@
-import { deleteSession, getSession, saveSession } from './database.js';
+import { deleteSession, getSession, recordDatabaseOperationError, saveSession } from './database.js';
+
+const fallbackSessions = new Map();
 
 function getSessionKey(ctx) {
     const fromId = ctx.from?.id;
@@ -31,8 +33,16 @@ export function persistentSession() {
             return next();
         }
 
-        const storedSession = await getSession(sessionKey);
-        const initialSession = normalizeSession(storedSession);
+        let storedSession = null;
+
+        try {
+            storedSession = await getSession(sessionKey);
+        } catch (error) {
+            recordDatabaseOperationError(error);
+            storedSession = fallbackSessions.get(sessionKey) ?? null;
+        }
+
+        const initialSession = normalizeSession(storedSession ?? fallbackSessions.get(sessionKey));
         const initialSerialized = JSON.stringify(initialSession);
 
         ctx.session = initialSession;
@@ -48,11 +58,21 @@ export function persistentSession() {
             }
 
             if (Object.keys(normalizedSession).length === 0) {
-                await deleteSession(sessionKey);
+                fallbackSessions.delete(sessionKey);
+                try {
+                    await deleteSession(sessionKey);
+                } catch (error) {
+                    recordDatabaseOperationError(error);
+                }
                 return;
             }
 
-            await saveSession(sessionKey, normalizedSession);
+            fallbackSessions.set(sessionKey, normalizedSession);
+            try {
+                await saveSession(sessionKey, normalizedSession);
+            } catch (error) {
+                recordDatabaseOperationError(error);
+            }
         }
     };
 }

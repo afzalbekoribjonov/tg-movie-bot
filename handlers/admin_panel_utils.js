@@ -1,5 +1,4 @@
 import { getMovieByCode, getSeriesByCode } from '../database.js';
-
 import { escapeHTML } from '../utils.js';
 
 export async function sendEditDeleteMenu(ctx, code, type) {
@@ -12,7 +11,7 @@ export async function sendEditDeleteMenu(ctx, code, type) {
         titleKey = '🎬 Kino';
         buttons = [
             [{ text: '✏️ Nomi/Janri/Yili/Tavsifi', callback_data: `edit:${type}:${code}:details` }],
-            [{ text: '🔗 Link', callback_data: `edit:${type}:${code}:link` }],
+            [{ text: '🎞 Video/rasm/faylni almashtirish', callback_data: `edit:${type}:${code}:media` }],
             [{ text: '🗑 O‘chirish', callback_data: `delete:${type}:${code}` }]
         ];
     } else if (type === 'series') {
@@ -27,17 +26,24 @@ export async function sendEditDeleteMenu(ctx, code, type) {
     }
 
     if (!item) {
-        return ctx.reply(`${titleKey} bazada topilmadi.`);
+        return ctx.reply(`${titleKey} topilmadi.`);
     }
+
+    const sourceText = item.file_id
+        ? 'Bot ichida saqlangan'
+        : item.link
+            ? 'Havola orqali saqlangan'
+            : 'Hech narsa biriktirilmagan';
 
     const message = `
 ${titleKey} <b>${escapeHTML(item.title)}</b> (${escapeHTML(String(item.year))})
 <b>Kod:</b> <code>${code}</code>
 <b>Janr:</b> ${escapeHTML(item.genre || 'Yoʻq')}
 <b>Tavsif:</b> <i>${escapeHTML(item.desc || 'Tavsif yoʻq')}</i>
+<b>Saqlanish turi:</b> ${escapeHTML(sourceText)}
 
 ---
-<b>${titleKey}ni tahrirlash uchun bo'limni tanlang:</b>
+<b>O‘zgartirish uchun bo‘limni tanlang:</b>
 `;
 
     return ctx.reply(message, {

@@ -1,5 +1,17 @@
 import { Telegraf } from 'telegraf';
-import { initDB, addUser, getRandomMovie, checkUserExists, isAdmin, getPremiumSettings } from './database.js';
+import {
+    initDB,
+    addUser,
+    getRandomMovie,
+    checkUserExists,
+    isAdmin,
+    getPremiumSettings,
+    getPromoChannelSettings,
+    getDatabaseStatus,
+    isDatabaseReady,
+    isDatabaseUnavailableError,
+    recordDatabaseOperationError,
+} from './database.js';
 import { userHandler } from './handlers/user.js';
 import { adminHandler } from './handlers/admin.js';
 import { getCachedChannels } from './channel_cache.js';
@@ -8,9 +20,43 @@ import { handleNumericCodeLookup } from './handlers/code_lookup.js';
 import config from './config.js';
 import { sendMedia, escapeHTML } from './utils.js';
 import { persistentSession } from './persistent_session.js';
+import { inlineHandler } from './handlers/inline.js';
+import { sendMaintenanceNotice, shouldServeMaintenance } from './handlers/maintenance.js';
 import http from 'http';
 
 const bot = new Telegraf(config.BOT_TOKEN);
+
+const PROTECTED_CONTENT_METHODS = new Set([
+    'sendMessage',
+    'sendPhoto',
+    'sendVideo',
+    'sendAnimation',
+    'sendAudio',
+    'sendDocument',
+    'sendSticker',
+    'sendVideoNote',
+    'sendVoice',
+    'sendLocation',
+    'sendVenue',
+    'sendContact',
+    'sendPoll',
+    'sendDice',
+    'sendInvoice',
+    'sendGame',
+    'sendMediaGroup',
+    'copyMessage',
+    'forwardMessage',
+]);
+
+const originalCallApi = bot.telegram.callApi.bind(bot.telegram);
+bot.telegram.callApi = async (method, payload, signal) => {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const finalPayload = PROTECTED_CONTENT_METHODS.has(method)
+        ? { ...safePayload, protect_content: true }
+        : safePayload;
+
+    return originalCallApi(method, finalPayload, signal);
+};
 
 bot.use(persistentSession());
 
@@ -21,8 +67,52 @@ bot.use((ctx, next) => {
     return next();
 });
 
+bot.use(async (ctx, next) => {
+    try {
+        await next();
+    } catch (error) {
+        recordDatabaseOperationError(error);
+        console.error('Middleware xatosi:', error);
+
+        if (isDatabaseUnavailableError(error) || !isDatabaseReady()) {
+            return sendMaintenanceNotice(ctx);
+        }
+
+        if (ctx.updateType === 'inline_query') {
+            return ctx.answerInlineQuery([], {
+                cache_time: 0,
+                is_personal: true,
+            }).catch(() => {});
+        }
+
+        if (ctx.updateType === 'callback_query') {
+            await ctx.answerCbQuery('⚠️ Xatolik yuz berdi. Qayta urinib ko‘ring.').catch(() => {});
+            if (ctx.chat?.id && ctx.callbackQuery?.message) {
+                return ctx.reply(escapeHTML('Kechirasiz, so‘rovni bajarishda xatolik yuz berdi. Iltimos, qayta urinib ko‘ring.'), {
+                    parse_mode: 'HTML'
+                }).catch(() => {});
+            }
+            return;
+        }
+
+        if (ctx.chat?.id) {
+            return ctx.reply(escapeHTML('Kechirasiz, so‘rovni bajarishda xatolik yuz berdi. Iltimos, qayta urinib ko‘ring.'), {
+                parse_mode: 'HTML'
+            }).catch(() => {});
+        }
+    }
+});
+
 bot.action('ignore', async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
+});
+
+bot.use(async (ctx, next) => {
+    if (shouldServeMaintenance(ctx)) {
+        return sendMaintenanceNotice(ctx);
+    }
+
+    return next();
 });
 
 bot.use(async (ctx, next) => {
@@ -57,7 +147,7 @@ bot.use(async (ctx, next) => {
             const notJoined = membershipChecks.filter(Boolean);
 
             if (notJoined.length > 0) {
-                const text = 'Iltimos, botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling:';
+                const text = 'Davom etish uchun quyidagi kanallarga obuna bo‘ling:';
                 const buttons = notJoined.map(c => [{ text: c.name, url: c.link }]);
 
                 return ctx.reply(text, { reply_markup: { inline_keyboard: buttons } });
@@ -67,6 +157,34 @@ bot.use(async (ctx, next) => {
 
     return next();
 });
+
+
+function formatReadyStateLabel(readyState) {
+    const map = {
+        0: 'Ulanmagan',
+        1: 'Ulangan',
+        2: 'Ulanmoqda',
+        3: 'Uzilmoqda',
+    };
+
+    return map[Number(readyState)] || 'Noma’lum';
+}
+
+async function buildAdminStatusMessage() {
+    const dbStatus = getDatabaseStatus();
+    const promoSettings = await getPromoChannelSettings().catch(() => null);
+    const botUsername = bot.botInfo?.username ? `@${bot.botInfo.username}` : 'Noma’lum';
+
+    return `🩺 <b>Bot holati</b>
+
+<b>Bot:</b> ${escapeHTML(botUsername)}
+<b>Baza:</b> ${isDatabaseReady() ? '✅ Ishlayapti' : '⚠️ Vaqtincha ulanmagan'}
+<b>Ulanish:</b> ${escapeHTML(formatReadyStateLabel(dbStatus.readyState))}
+<b>Oxirgi muammo:</b> ${escapeHTML(dbStatus.lastError || 'Yo‘q')}
+<b>Reklama kanali:</b> ${promoSettings?.promo_channel_title ? escapeHTML(promoSettings.promo_channel_title) : 'Ulanmagan'}
+
+<b>Eslatma:</b> Agar baza ulanmagan bo‘lsa, foydalanuvchilarga kutish xabari ko‘rsatiladi.`;
+}
 
 bot.command('random', async (ctx) => {
     const movie = await getRandomMovie();
@@ -82,10 +200,27 @@ bot.command('premium', async (ctx) => {
     const premiumSettings = await getPremiumSettings();
 
     if (!premiumSettings.enabled) {
-        return ctx.reply(escapeHTML('Hozircha premium rejim mavjud emas.'), { parse_mode: 'HTML' });
+        return ctx.reply(escapeHTML('Hozircha yopiq bo‘lim ochilmagan.'), { parse_mode: 'HTML' });
     }
 
     await sendPremiumMessage(ctx);
+});
+
+
+bot.command('status', async (ctx) => {
+    if (!ctx.from || !isAdmin(ctx.from.id)) {
+        return;
+    }
+
+    return ctx.reply(await buildAdminStatusMessage(), { parse_mode: 'HTML' });
+});
+
+bot.command('health', async (ctx) => {
+    if (!ctx.from || !isAdmin(ctx.from.id)) {
+        return;
+    }
+
+    return ctx.reply(await buildAdminStatusMessage(), { parse_mode: 'HTML' });
 });
 
 bot.start(async (ctx) => {
@@ -108,52 +243,139 @@ bot.start(async (ctx) => {
     if (!userAlreadyExists) {
         welcomeMessage = `
 Assalomu alaykum, <b>${escapeHTML(firstName)}</b>!
-Xush kelibsiz, Iltimos, kino kodini kiriting!
+Xush kelibsiz. Kino kodini yuboring!
 `;
     } else {
         welcomeMessage = `
-<b>${escapeHTML(firstName)}</b>, iltimos kino kodini kiriting!
+<b>${escapeHTML(firstName)}</b>, kino kodini yuboring!
 `;
     }
 
     return ctx.reply(welcomeMessage, { parse_mode: 'HTML' });
 });
 
-
 adminHandler(bot);
-
 userHandler(bot);
+inlineHandler(bot);
+
+const BOT_RETRY_DELAY_MS = 15000;
+let botLaunchInProgress = false;
+let botLaunchRetryTimer = null;
+
+function scheduleBotLaunchRetry() {
+    if (botLaunchRetryTimer) return;
+
+    botLaunchRetryTimer = setTimeout(() => {
+        botLaunchRetryTimer = null;
+        startTelegramBot().catch((error) => {
+            console.error('Botni qayta ulashda xato:', error);
+            scheduleBotLaunchRetry();
+        });
+    }, BOT_RETRY_DELAY_MS);
+}
+
+async function startTelegramBot() {
+    if (botLaunchInProgress) {
+        return false;
+    }
+
+    botLaunchInProgress = true;
+    try {
+        const me = await bot.telegram.getMe();
+        bot.botInfo = me;
+        console.log(`Bot foydalanuvchisi: @${me.username}`);
+
+        if (!me.supports_inline_queries) {
+            console.warn('⚠️ Chat ichida qidirish hali yoqilmagan. @BotFather orqali /setinline ni yoqing.');
+        }
+
+        await bot.launch({
+            polling: {
+                timeout: 30,
+                limit: 100,
+            }
+        });
+        console.log('Bot Telegram bilan bog‘landi va ishlamoqda.');
+        return true;
+    } catch (error) {
+        console.error('Telegram bilan ulanishda muammo bo‘ldi:', error);
+        scheduleBotLaunchRetry();
+        return false;
+    } finally {
+        botLaunchInProgress = false;
+    }
+}
+
+bot.catch(async (error, ctx) => {
+    recordDatabaseOperationError(error);
+    console.error('Bot.catch xatosi:', error);
+
+    if (isDatabaseUnavailableError(error) || !isDatabaseReady()) {
+        await sendMaintenanceNotice(ctx);
+        return;
+    }
+
+    if (ctx?.updateType === 'inline_query') {
+        await ctx.answerInlineQuery([], {
+            cache_time: 0,
+            is_personal: true,
+        }).catch(() => {});
+        return;
+    }
+
+    if (ctx?.updateType === 'callback_query') {
+        await ctx.answerCbQuery('⚠️ Xatolik yuz berdi.').catch(() => {});
+        if (ctx.chat?.id && ctx.callbackQuery?.message) {
+            await ctx.reply(escapeHTML('Kechirasiz, so‘rovni bajarishda xatolik yuz berdi. Iltimos, qayta urinib ko‘ring.'), {
+                parse_mode: 'HTML'
+            }).catch(() => {});
+        }
+        return;
+    }
+
+    if (ctx?.chat?.id) {
+        await ctx.reply(escapeHTML('Kechirasiz, so‘rovni bajarishda xatolik yuz berdi. Iltimos, qayta urinib ko‘ring.'), {
+            parse_mode: 'HTML'
+        }).catch(() => {});
+    }
+});
 
 async function startBot() {
     const PORT = process.env.PORT || 3000;
 
-    // 1. Birinchi: Renderning port scan talabini qondirish uchun HTTP serverni ishga tushirish
-    // Bu asosiy jarayonni ochiq ushlab turadi va Render portni tezda topishini ta'minlaydi.
     const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Bot service is active and listening for pings.');
+        res.end('Bot is running.');
     });
 
     server.listen(PORT, () => {
         console.log(`🤖 Render Web Service uchun port ${PORT} ni tinglayapti!`);
     });
 
-    // 2. Ikkinchi: Ma'lumotlar bazasiga ulanishni kutish
-    await initDB();
-    console.log('MongoDB ulanishi muvaffaqiyatli yakunlandi.');
+    await startTelegramBot();
 
-    // 3. Uchinchi: Telegram bilan aloqa: Long Pollingni ishga tushirish
-    // Bu fon rejimida Telegram xabarlarini qabul qiladi.
-    bot.launch({
-        polling: {
-            timeout: 30,
-            limit: 100
-        }
-    });
-    console.log('Telegram Long Polling faol va ishlamoqda.');
+    const dbConnected = await initDB();
+    const dbStatus = getDatabaseStatus();
+
+    if (dbConnected) {
+        console.log('MongoDB ulanishi muvaffaqiyatli yakunlandi.');
+    } else {
+        console.warn(`⚠️ Baza ulanmagan. Bot foydalanuvchilarga kutish haqida xabar ko‘rsatadi. readyState=${dbStatus.readyState}; lastError=${dbStatus.lastError || 'noma’lum'}`);
+    }
 }
 
-startBot();
+startBot().catch((error) => {
+    console.error('Botni ishga tushirishda muammo bo‘ldi:', error);
+    scheduleBotLaunchRetry();
+});
+
+process.on('unhandledRejection', (error) => {
+    console.error('Kutilmagan promise xatosi:', error);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Kutilmagan xato:', error);
+});
 
 process.once('SIGINT', () => {
     bot.stop('SIGINT');

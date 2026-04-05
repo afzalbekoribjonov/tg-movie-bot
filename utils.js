@@ -1,4 +1,5 @@
 import { sendPremiumMessage } from './handlers/premium.js';
+import { getShareButtonRow } from './handlers/share.js';
 
 export function escapeHTML(text) {
     if (!text) return '';
@@ -37,6 +38,71 @@ function inferMediaTypeFromValue(value) {
         /\.(pdf|doc|docx|xls|xlsx|zip|rar|7z|txt)$/i.test(normalizedValue)
     ) {
         return 'document';
+    }
+
+    return null;
+}
+
+export function extractTelegramMedia(message) {
+    if (!message) {
+        return null;
+    }
+
+    if (message.video) {
+        return {
+            media_type: 'video',
+            file_id: message.video.file_id,
+            file_unique_id: message.video.file_unique_id,
+            file_name: message.video.file_name || null,
+            mime_type: message.video.mime_type || null,
+            file_size: message.video.file_size || null,
+            duration: message.video.duration || null,
+        };
+    }
+
+    if (message.document) {
+        return {
+            media_type: 'document',
+            file_id: message.document.file_id,
+            file_unique_id: message.document.file_unique_id,
+            file_name: message.document.file_name || null,
+            mime_type: message.document.mime_type || null,
+            file_size: message.document.file_size || null,
+            duration: null,
+        };
+    }
+
+    if (Array.isArray(message.photo) && message.photo.length > 0) {
+        const bestPhoto = message.photo[message.photo.length - 1];
+        return {
+            media_type: 'photo',
+            file_id: bestPhoto.file_id,
+            file_unique_id: bestPhoto.file_unique_id,
+            file_name: null,
+            mime_type: null,
+            file_size: bestPhoto.file_size || null,
+            duration: null,
+        };
+    }
+
+    return null;
+}
+
+function getItemMediaSource(item) {
+    if (item?.file_id) {
+        return {
+            source: item.file_id,
+            mediaType: item.media_type || inferMediaTypeFromValue(item.file_name) || 'video',
+            isLegacy: false,
+        };
+    }
+
+    if (item?.link) {
+        return {
+            source: item.link,
+            mediaType: null,
+            isLegacy: true,
+        };
     }
 
     return null;
@@ -100,26 +166,47 @@ export async function sendMediaWithFallback(ctx, link, caption, extra = {}) {
     throw lastError || new Error('Media yuborishda noma’lum xatolik yuz berdi.');
 }
 
-export async function sendMedia(ctx, item) {
-    // Ma'lumotlarni escape qilish
+export async function sendStoredMedia(ctx, item, caption, extra = {}) {
+    const mediaInfo = getItemMediaSource(item);
+
+    if (!mediaInfo) {
+        throw new Error('Media topilmadi.');
+    }
+
+    if (!mediaInfo.isLegacy && mediaInfo.mediaType) {
+        await sendMediaByType(ctx, mediaInfo.source, caption, mediaInfo.mediaType, extra);
+        return mediaInfo.mediaType;
+    }
+
+    return sendMediaWithFallback(ctx, mediaInfo.source, caption, extra);
+}
+
+export function buildItemCaption(item, emoji = '🎬') {
     const title = escapeHTML(item.title);
-    const year = escapeHTML(String(item.year));
+    const year = escapeHTML(String(item.year || 'Noma’lum'));
     const genre = escapeHTML(item.genre || 'Yoʻq');
     const desc = escapeHTML(item.desc || 'Tavsif yoʻq');
 
-    const caption = `
-🎬 <b>${title}</b> (${year})
+    return `
+${emoji} <b>${title}</b> (${year})
 
 <b>🎦 Janr:</b> ${genre}
 <b>📄 Tavsif:</b> <i>${desc}</i>
 `;
+}
 
-    if (!item.link) {
-        return ctx.reply(`<b>${title}</b> uchun media (link/ID) topilmadi.\n${caption}`, { parse_mode: 'HTML' });
+export async function sendMedia(ctx, item) {
+    const caption = buildItemCaption(item, '🎬');
+    const shareButtonRow = getShareButtonRow('movie', item?.code);
+
+    if (!item?.file_id && !item?.link) {
+        return ctx.reply(`<b>${escapeHTML(item.title)}</b> uchun video, rasm yoki fayl topilmadi.\n${caption}`, { parse_mode: 'HTML' });
     }
 
     try {
-        await sendMediaWithFallback(ctx, item.link, caption);
+        await sendStoredMedia(ctx, item, caption, shareButtonRow ? {
+            reply_markup: { inline_keyboard: [shareButtonRow] }
+        } : {});
         try {
             await sendPremiumMessage(ctx, item.code ?? null);
         } catch (premiumError) {
@@ -128,11 +215,15 @@ export async function sendMedia(ctx, item) {
     } catch (error) {
         console.error(`Media yuborishda xato ${item.code}:`, error.message);
 
-        const errorMessageText = `⚠️ Media yuborishda xatolik yuz berdi.
+        const sourceInfo = item.file_id
+            ? `<b>Saqlangan fayl:</b> <code>${escapeHTML(item.file_id)}</code>`
+            : `<b>Link:</b> <code>${escapeHTML(item.link)}</code>`;
+
+        const errorMessageText = `⚠️ Kino yuborishda muammo bo‘ldi.
 <b>Xato:</b> <pre>${escapeHTML(error.message)}</pre>
 
 ${caption}
-<b>Link:</b> <code>${escapeHTML(item.link)}</code>
+${sourceInfo}
 `;
 
         return ctx.reply(errorMessageText, { parse_mode: 'HTML' });
