@@ -418,7 +418,7 @@ function buildPromoMenuMessage(settings) {
 
 function getPromoMenuKeyboard(hasChannel) {
     const buttons = [
-        [{ text: '⚙️ Asosiy promo kanalni ulash', callback_data: 'admin:promo_set_channel' }],
+        [{ text: '⚙️ Beigo hubni ula naxxuy', callback_data: 'admin:promo_set_channel' }],
         [{ text: '🎞 Promo post yaratish', callback_data: 'admin:promo_create' }],
     ];
 
