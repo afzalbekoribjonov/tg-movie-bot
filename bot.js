@@ -344,8 +344,35 @@ async function startBot() {
     const PORT = process.env.PORT || 3000;
 
     const server = http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Bot is running.');
+        const method = req.method || 'GET';
+        const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+        const isHealthRoute = requestUrl.pathname === '/' || requestUrl.pathname === '/health' || requestUrl.pathname === '/healthz';
+
+        res.setHeader('Cache-Control', 'no-store');
+
+        if (isHealthRoute && (method === 'GET' || method === 'HEAD')) {
+            res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+
+            if (method === 'HEAD') {
+                res.end();
+                return;
+            }
+
+            res.end('OK');
+            return;
+        }
+
+        if (isHealthRoute) {
+            res.writeHead(405, {
+                'Content-Type': 'application/json; charset=utf-8',
+                'Allow': 'GET, HEAD'
+            });
+            res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed' }));
+            return;
+        }
+
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'Not Found' }));
     });
 
     server.listen(PORT, () => {
