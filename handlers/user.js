@@ -2,6 +2,7 @@ import { isAdmin, getPremiumSettings } from '../database.js';
 import { serialHandler } from './serial.js';
 import { escapeHTML } from '../utils.js';
 import { handleNumericCodeLookup } from './code_lookup.js';
+import { extractPrivateInlineSelection, isOwnInlinePlaceholderMessage } from './inline_private.js';
 
 function getInlineSearchKeyboard() {
     return {
@@ -17,8 +18,19 @@ export function userHandler(bot) {
     bot.on('text', async (ctx) => {
         const userId = Number(ctx.from?.id);
         const text = ctx.message?.text?.trim?.();
+        const botId = ctx.botInfo?.id || bot.botInfo?.id;
 
         if (!text || isAdmin(userId) || text.startsWith('/')) {
+            return;
+        }
+
+        const inlineSelection = extractPrivateInlineSelection(text);
+        if (inlineSelection) {
+            await ctx.deleteMessage().catch(() => {});
+            return handleNumericCodeLookup(ctx, String(inlineSelection.code));
+        }
+
+        if (isOwnInlinePlaceholderMessage(ctx.message, botId)) {
             return;
         }
 

@@ -11,6 +11,7 @@ import { getStatsMenuData, createListMenuData } from './admin_stats.js';
 import { invalidateChannelsCache } from '../channel_cache.js';
 import { escapeHTML, extractTelegramMedia } from '../utils.js';
 import { handleNumericCodeLookup } from './code_lookup.js';
+import { extractPrivateInlineSelection, isOwnInlinePlaceholderMessage } from './inline_private.js';
 
 const BROADCAST_CONCURRENCY = 5;
 const BROADCAST_DELAY_MS = 50;
@@ -1431,9 +1432,20 @@ export function adminHandler(bot) {
 
         if (!ctx.session) ctx.session = {};
         const text = ctx.message?.text?.trim?.();
+        const botId = ctx.botInfo?.id || bot.botInfo?.id;
         if (!text) return;
 
         if (text.startsWith('/')) return next();
+
+        const inlineSelection = extractPrivateInlineSelection(text);
+        if (inlineSelection) {
+            await ctx.deleteMessage().catch(() => {});
+            return handleNumericCodeLookup(ctx, String(inlineSelection.code));
+        }
+
+        if (isOwnInlinePlaceholderMessage(ctx.message, botId)) {
+            return;
+        }
 
         const step = ctx.session.adminStep;
         if (!step) {

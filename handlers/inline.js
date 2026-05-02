@@ -9,6 +9,7 @@ import {
 } from '../database.js';
 import { buildItemCaption, escapeHTML } from '../utils.js';
 import { buildRecommendationMessage } from './share.js';
+import { buildPrivateInlineSelectionMessage } from './inline_private.js';
 
 const INLINE_MOVIE_LIMIT = 20;
 const INLINE_SERIES_LIMIT = 10;
@@ -53,9 +54,29 @@ function buildSeriesInlineText(series, episodeCount) {
 `.trim();
 }
 
-function createMovieInlineResult(movie, botUsername) {
+function isPrivateInlineChat(ctx) {
+    const chatType = String(ctx.inlineQuery?.chat_type || '').toLowerCase();
+    return chatType === 'private' || chatType === 'sender';
+}
+
+function createMovieInlineResult(movie, botUsername, isPrivateChat = false) {
     const title = movie.title || `Kino ${movie.code}`;
     const caption = buildItemCaption(movie, '🎬').trim();
+
+    if (isPrivateChat) {
+        return {
+            type: 'article',
+            id: `movie:${movie.code}`,
+            title,
+            description: `${buildMovieDescription(movie)} • Tanlanganda bot darrov yuboradi`,
+            input_message_content: {
+                message_text: buildPrivateInlineSelectionMessage('movie', movie),
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+            },
+        };
+    }
+
     const replyMarkup = {
         inline_keyboard: [
             [{ text: '🤖 Botda ochish', url: `https://t.me/${botUsername}?start=${movie.code}` }]
@@ -76,7 +97,21 @@ function createMovieInlineResult(movie, botUsername) {
     };
 }
 
-function createSeriesInlineResult(series, episodeCount, botUsername) {
+function createSeriesInlineResult(series, episodeCount, botUsername, isPrivateChat = false) {
+    if (isPrivateChat) {
+        return {
+            type: 'article',
+            id: `series:${series.code}`,
+            title: series.title || `Serial ${series.code}`,
+            description: `${buildSeriesDescription(series, episodeCount)} • Tanlanganda 1-qism ochiladi`,
+            input_message_content: {
+                message_text: buildPrivateInlineSelectionMessage('series', series),
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+            },
+        };
+    }
+
     return {
         type: 'article',
         id: `series:${series.code}`,
@@ -164,6 +199,7 @@ export function inlineHandler(bot) {
         try {
             const query = String(ctx.inlineQuery?.query || '').trim();
             const botUsername = ctx.botInfo?.username || bot.botInfo?.username;
+            const privateChatMode = isPrivateInlineChat(ctx);
 
             if (!botUsername) {
                 return ctx.answerInlineQuery([], {
@@ -186,11 +222,12 @@ export function inlineHandler(bot) {
             movies.sort((a, b) => Number(Boolean(b.file_id)) - Number(Boolean(a.file_id)));
             const episodeCountMap = await getSeriesEpisodeCounts(series.map(item => item.code));
 
-            const movieResults = movies.map(movie => createMovieInlineResult(movie, botUsername));
+            const movieResults = movies.map(movie => createMovieInlineResult(movie, botUsername, privateChatMode));
             const seriesResults = series.map(seriesItem => createSeriesInlineResult(
                 seriesItem,
                 episodeCountMap.get(Number(seriesItem.code)) || 0,
                 botUsername,
+                privateChatMode,
             ));
 
             const results = [...movieResults, ...seriesResults].slice(0, 50);
