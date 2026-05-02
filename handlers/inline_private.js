@@ -16,12 +16,22 @@ export function extractPrivateInlineSelection(text) {
 
 export function buildPrivateInlineSelectionMessage(itemType, item) {
     const emoji = itemType === 'series' ? '📺' : '🎬';
-    const action = itemType === 'series' ? 'Serial tayyorlanmoqda' : 'Kino tayyorlanmoqda';
+    const action = itemType === 'series' ? 'Serial tanlandi' : 'Kino tanlandi';
     const title = escapeHTML(item?.title || `${itemType === 'series' ? 'Serial' : 'Kino'} ${item?.code || ''}`.trim());
     const code = Number(item?.code);
+    const year = escapeHTML(String(item?.year || 'Noma’lum'));
+    const genre = escapeHTML(item?.genre || 'Yo‘q');
+    const episodeCount = Number(item?.episode_count || 0);
+    const hint = itemType === 'series'
+        ? `🎞 <b>1-qism avtomatik ochiladi</b>${episodeCount ? ` • ${episodeCount} qism` : ''}`
+        : '🪄 <b>Bot filmni hozir ochadi</b>';
 
     return `${emoji} <b>${action}</b>
-<i>${title}</i>
+<b>${title}</b>
+🗓 <b>Yili:</b> ${year}
+🎭 <b>Janri:</b> ${genre}
+🆔 <b>Kod:</b> ${code}
+${hint}
 <tg-spoiler>__beigo_open_${itemType}_${code}__</tg-spoiler>`;
 }
 

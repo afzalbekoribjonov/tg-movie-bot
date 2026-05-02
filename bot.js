@@ -22,6 +22,7 @@ import { sendMedia, escapeHTML } from './utils.js';
 import { persistentSession } from './persistent_session.js';
 import { inlineHandler } from './handlers/inline.js';
 import { sendMaintenanceNotice, shouldServeMaintenance } from './handlers/maintenance.js';
+import { buildSubscriptionPrompt, extractPendingLookupRequest, getMissingSubscriptionChannels } from './handlers/subscription_gate.js';
 import http from 'http';
 
 const bot = new Telegraf(config.BOT_TOKEN);
@@ -125,32 +126,19 @@ bot.use(async (ctx, next) => {
         const channels = await getCachedChannels();
 
         if (channels.length > 0) {
-            const userId = ctx.from.id;
-            const membershipChecks = await Promise.all(
-                channels.map(async (channel) => {
-                    if (!channel.channel_id) {
-                        return null;
-                    }
-
-                    try {
-                        const member = await ctx.telegram.getChatMember(channel.channel_id, userId);
-                        const isJoined = !['left', 'kicked'].includes(member.status);
-
-                        return isJoined ? null : channel;
-                    } catch (err) {
-                        console.error(`Obuna tekshiruvida xato ${channel.channel_id}:`, err.message);
-                        return channel;
-                    }
-                })
-            );
-
-            const notJoined = membershipChecks.filter(Boolean);
+            const notJoined = await getMissingSubscriptionChannels(ctx, channels);
 
             if (notJoined.length > 0) {
-                const text = 'Davom etish uchun quyidagi kanallarga obuna bo‘ling:';
-                const buttons = notJoined.map(c => [{ text: c.name, url: c.link }]);
+                const pendingLookup = extractPendingLookupRequest(ctx.message.text || ctx.message.caption || '');
+                if (pendingLookup) {
+                    ctx.session.pendingLookup = pendingLookup;
+                }
 
-                return ctx.reply(text, { reply_markup: { inline_keyboard: buttons } });
+                const prompt = buildSubscriptionPrompt(notJoined, ctx.session.pendingLookup);
+                return ctx.reply(prompt.text, {
+                    parse_mode: 'HTML',
+                    reply_markup: prompt.reply_markup
+                });
             }
         }
     }
@@ -254,15 +242,15 @@ Assalomu alaykum, <b>${escapeHTML(firstName)}</b>! 🍿
 
 Botga xush kelibsiz. Bu yerda kino va seriallarni:
 🎟 kod orqali
-🔎 yoki shu chatning o‘zida nom bo‘yicha inline qidiruv orqali topishingiz mumkin.
+🔎 yoki shu chatning o‘zida nomi bo‘yicha izlab topishingiz mumkin.
 
-Quyidagi tugmani bossangiz, <b>@${escapeHTML(bot.botInfo?.username || 'bot')}</b> orqali qidiruv ochiladi. Yoki shunchaki kino kodini yuboring.
+Quyidagi tugmani bossangiz, qidiruv oynasi ochiladi. Yoki shunchaki kino kodini yuboring.
 `;
     } else {
         welcomeMessage = `
 Xush kelibsiz, <b>${escapeHTML(firstName)}</b>! 🎬
 
-Kino yoki serial kodini yuboring, yoki pastdagi tugma orqali shu chatning o‘zida nom/kod bo‘yicha qidiring.
+Kino yoki serial kodini yuboring, yoki pastdagi tugma orqali shu chatning o‘zida nomi bo‘yicha izlang.
 `;
     }
 

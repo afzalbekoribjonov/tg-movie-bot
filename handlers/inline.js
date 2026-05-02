@@ -105,7 +105,10 @@ function createSeriesInlineResult(series, episodeCount, botUsername, isPrivateCh
             title: series.title || `Serial ${series.code}`,
             description: `${buildSeriesDescription(series, episodeCount)} • Tanlanganda 1-qism ochiladi`,
             input_message_content: {
-                message_text: buildPrivateInlineSelectionMessage('series', series),
+                message_text: buildPrivateInlineSelectionMessage('series', {
+                    ...series,
+                    episode_count: episodeCount,
+                }),
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
             },

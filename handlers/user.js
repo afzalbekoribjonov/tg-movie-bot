@@ -3,6 +3,8 @@ import { serialHandler } from './serial.js';
 import { escapeHTML } from '../utils.js';
 import { handleNumericCodeLookup } from './code_lookup.js';
 import { extractPrivateInlineSelection, isOwnInlinePlaceholderMessage } from './inline_private.js';
+import { buildSubscriptionPrompt, getMissingSubscriptionChannels } from './subscription_gate.js';
+import { getCachedChannels } from '../channel_cache.js';
 
 function getInlineSearchKeyboard() {
     return {
@@ -36,7 +38,7 @@ export function userHandler(bot) {
 
         if (!/^\d+$/.test(text)) {
             return ctx.reply(
-                escapeHTML('🤖 Kino yoki serialni topish uchun raqamli kod yuboring. Nom bo‘yicha qidirmoqchi bo‘lsangiz, pastdagi tugmadan foydalaning.'),
+                escapeHTML('🤖 Kino yoki serialni topish uchun raqamli kod yuboring. Nomi bo‘yicha izlamoqchi bo‘lsangiz, pastdagi tugmani bosing.'),
                 {
                     parse_mode: 'HTML',
                     reply_markup: getInlineSearchKeyboard()
@@ -51,10 +53,27 @@ export function userHandler(bot) {
         const data = ctx.callbackQuery?.data;
 
         if (data === 'check_subscription') {
-            await ctx.answerCbQuery('Obuna tekshirilmoqda...');
+            await ctx.answerCbQuery('Obuna holati ko‘rilmoqda...');
+            const channels = await getCachedChannels();
+            const notJoined = await getMissingSubscriptionChannels(ctx, channels);
+
+            if (notJoined.length > 0) {
+                const prompt = buildSubscriptionPrompt(notJoined, ctx.session?.pendingLookup);
+                return ctx.editMessageText(prompt.text, {
+                    parse_mode: 'HTML',
+                    reply_markup: prompt.reply_markup
+                });
+            }
+
             await ctx.deleteMessage().catch(() => {});
 
-            return ctx.reply(escapeHTML('✅ Obuna holati yangilandi. Endi kino kodini yuborishingiz yoki inline qidiruvdan foydalanishingiz mumkin.'), {
+            const pendingCode = Number(ctx.session?.pendingLookup?.code);
+            if (Number.isFinite(pendingCode) && pendingCode > 0) {
+                ctx.session.pendingLookup = null;
+                return handleNumericCodeLookup(ctx, String(pendingCode));
+            }
+
+            return ctx.reply(escapeHTML('✅ Hammasi joyida! Endi kino kodini yuborishingiz yoki pastdagi tugma orqali nomi bo‘yicha izlashingiz mumkin.'), {
                 parse_mode: 'HTML',
                 reply_markup: getInlineSearchKeyboard()
             });
