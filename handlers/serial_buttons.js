@@ -1,4 +1,4 @@
-const EPISODES_PER_PAGE = 10;
+export const EPISODES_PER_PAGE = 10;
 
 export function createSerialButtons(code, episodes, page = 0) {
     const buttons = [];

@@ -7,7 +7,7 @@ export function adminCommandsHandler(bot) {
         if (!isAdmin(uid)) return ctx.reply('Siz admin emassiz.');
         if (!ctx.session) ctx.session = {};
         ctx.session.adminStep = 'add_channel_id';
-        return ctx.reply('Kanalni yuboring. Masalan: @Kanalim yoki -1001234567890');
+        return ctx.reply('📢 Kanalni yuboring. Masalan: @Kanalim yoki -1001234567890\n\nBekor qilish kerak bo‘lsa: /cancel');
     });
 
     bot.command('delchannel', async (ctx) => {

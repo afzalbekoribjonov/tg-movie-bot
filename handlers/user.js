@@ -3,6 +3,13 @@ import { serialHandler } from './serial.js';
 import { escapeHTML } from '../utils.js';
 import { handleNumericCodeLookup } from './code_lookup.js';
 
+function getInlineSearchKeyboard() {
+    return {
+        inline_keyboard: [
+            [{ text: '🔎 Kino qidirish', switch_inline_query_current_chat: '' }]
+        ]
+    };
+}
 
 export function userHandler(bot) {
     serialHandler(bot);
@@ -16,7 +23,13 @@ export function userHandler(bot) {
         }
 
         if (!/^\d+$/.test(text)) {
-            return ctx.reply(escapeHTML('Iltimos, faqat raqamli kod yuboring.'), { parse_mode: 'HTML' });
+            return ctx.reply(
+                escapeHTML('🤖 Kino yoki serialni topish uchun raqamli kod yuboring. Nom bo‘yicha qidirmoqchi bo‘lsangiz, pastdagi tugmadan foydalaning.'),
+                {
+                    parse_mode: 'HTML',
+                    reply_markup: getInlineSearchKeyboard()
+                }
+            );
         }
 
         return handleNumericCodeLookup(ctx, text);
@@ -29,7 +42,10 @@ export function userHandler(bot) {
             await ctx.answerCbQuery('Obuna tekshirilmoqda...');
             await ctx.deleteMessage().catch(() => {});
 
-            return ctx.reply(escapeHTML('✅ Obuna holati yangilandi. Iltimos, kod kiritishni davom ettiring.'), { parse_mode: 'HTML' });
+            return ctx.reply(escapeHTML('✅ Obuna holati yangilandi. Endi kino kodini yuborishingiz yoki inline qidiruvdan foydalanishingiz mumkin.'), {
+                parse_mode: 'HTML',
+                reply_markup: getInlineSearchKeyboard()
+            });
         }
 
         if (data?.startsWith('buy_premium')) {
@@ -57,7 +73,7 @@ ${priceText}
 👤 <b>Karta egasi:</b>
 ${cardOwner}
 
-📌 To‘lov qilganingizdan keyin quyidagi tugmani bosing:
+📌 To‘lov qilganingizdan keyin quyidagi tugmani bosing. Chekni saqlab qo‘ying:
 `;
 
             return ctx.editMessageText(message, {
@@ -87,7 +103,7 @@ ${cardOwner}
 🧾 To‘lov chekini adminga yuboring:
 @${adminUsername}
 
-⏳ To‘lov tasdiqlangach, siz yopiq kanal bo‘yicha yo‘riqnoma olasiz.
+⏳ To‘lov tasdiqlangach, siz yopiq kanal bo‘yicha yo‘riqnoma olasiz. Sabr uchun rahmat.
 `;
 
             return ctx.editMessageText(message, {

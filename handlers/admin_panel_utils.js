@@ -44,6 +44,7 @@ ${titleKey} <b>${escapeHTML(item.title)}</b> (${escapeHTML(String(item.year))})
 
 ---
 <b>O‘zgartirish uchun bo‘limni tanlang:</b>
+<i>Diqqat: o‘chirish amallari tasdiq bilan bajariladi.</i>
 `;
 
     return ctx.reply(message, {

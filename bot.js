@@ -186,6 +186,14 @@ async function buildAdminStatusMessage() {
 <b>Eslatma:</b> Agar baza ulanmagan bo‘lsa, foydalanuvchilarga kutish xabari ko‘rsatiladi.`;
 }
 
+function getUserStartKeyboard() {
+    return {
+        inline_keyboard: [
+            [{ text: '🔎 Kino qidirish', switch_inline_query_current_chat: '' }]
+        ]
+    };
+}
+
 bot.command('random', async (ctx) => {
     const movie = await getRandomMovie();
 
@@ -242,16 +250,26 @@ bot.start(async (ctx) => {
 
     if (!userAlreadyExists) {
         welcomeMessage = `
-Assalomu alaykum, <b>${escapeHTML(firstName)}</b>!
-Xush kelibsiz. Kino kodini yuboring!
+Assalomu alaykum, <b>${escapeHTML(firstName)}</b>! 🍿
+
+Botga xush kelibsiz. Bu yerda kino va seriallarni:
+🎟 kod orqali
+🔎 yoki shu chatning o‘zida nom bo‘yicha inline qidiruv orqali topishingiz mumkin.
+
+Quyidagi tugmani bossangiz, <b>@${escapeHTML(bot.botInfo?.username || 'bot')}</b> orqali qidiruv ochiladi. Yoki shunchaki kino kodini yuboring.
 `;
     } else {
         welcomeMessage = `
-<b>${escapeHTML(firstName)}</b>, kino kodini yuboring!
+Xush kelibsiz, <b>${escapeHTML(firstName)}</b>! 🎬
+
+Kino yoki serial kodini yuboring, yoki pastdagi tugma orqali shu chatning o‘zida nom/kod bo‘yicha qidiring.
 `;
     }
 
-    return ctx.reply(welcomeMessage, { parse_mode: 'HTML' });
+    return ctx.reply(welcomeMessage, {
+        parse_mode: 'HTML',
+        reply_markup: getUserStartKeyboard()
+    });
 });
 
 adminHandler(bot);

@@ -1,7 +1,6 @@
 import { getMovieByCode, getSeriesByCode, getSeriesEpisodes } from '../database.js';
 import { sendMedia, escapeHTML } from '../utils.js';
-import { createSerialButtons } from './serial_buttons.js';
-import { appendKeyboardRow, getShareButtonRow } from './share.js';
+import { sendSeriesEpisodeMessage } from './serial.js';
 
 export async function handleNumericCodeLookup(ctx, rawCode) {
     const text = String(rawCode || '').trim();
@@ -19,43 +18,25 @@ export async function handleNumericCodeLookup(ctx, rawCode) {
             const episodes = await getSeriesEpisodes(code);
 
             const title = escapeHTML(series.title);
-            const year = escapeHTML(String(series.year));
-            const genre = escapeHTML(series.genre || 'Yoʻq');
-            const desc = escapeHTML(series.desc || 'Tavsif yoʻq');
 
             if (!episodes || episodes.length === 0) {
-                await ctx.reply(`📺 <b>${title}</b> uchun hali epizod mavjud emas.`, { parse_mode: 'HTML' });
+                await ctx.reply(`📺 <b>${title}</b> uchun hali epizod qo‘shilmagan.\n\nIltimos, birozdan keyin qayta tekshirib ko‘ring.`, { parse_mode: 'HTML' });
                 return true;
             }
 
-            const buttons = appendKeyboardRow(
-                createSerialButtons(code, episodes, 0),
-                getShareButtonRow('series', code)
-            );
-            const message = `
-📺 <b>${title}</b> (${year})
-
-<b>🎦 Janr:</b> ${genre}
-<b>📄 Tavsif:</b> <i>${desc}</i>
-
-<b>Seriyalar soni:</b> ${episodes.length}
-
-<b>Iltimos, qismni tanlang:</b>
-`;
-
-            await ctx.reply(message, {
-                reply_markup: { inline_keyboard: buttons },
-                parse_mode: 'HTML'
-            });
+            await sendSeriesEpisodeMessage(ctx, code, series, episodes, 0);
             return true;
         }
 
-        await ctx.reply(escapeHTML('Bunday kod topilmadi.'), { parse_mode: 'HTML' });
+        await ctx.reply(
+            escapeHTML('😕 Bunday kod topilmadi. Kodni qayta tekshirib ko‘ring yoki /start dagi qidiruv tugmasi orqali nom bo‘yicha izlab ko‘ring.'),
+            { parse_mode: 'HTML' }
+        );
         return false;
     } catch (error) {
         console.error(`Foydalanuvchi kodi ${text} ni qayta ishlashda xato:`, error);
         await ctx.reply(
-            escapeHTML('Kechirasiz, hozircha so‘rovni bajarishda muammo yuz berdi. Iltimos, birozdan keyin qayta urinib ko‘ring.'),
+            escapeHTML('⚠️ Kechirasiz, hozircha so‘rovni bajarishda muammo yuz berdi. Iltimos, birozdan keyin qayta urinib ko‘ring.'),
             { parse_mode: 'HTML' }
         );
         return false;
